@@ -1,7 +1,6 @@
 {
   "crons": [
-    { "path": "/api/cron/notify?key=@cron", "schedule": "* * * * *" },
-    { "path": "/api/cron/cache?key=@cron", "schedule": "3 19 * * *" },
-    { "path": "/api/cron/schedule?key=@cron", "schedule": "5 19 * * *" }
+    { "path": "/api/cron/cache", "schedule": "3 19 * * *" },
+    { "path": "/api/cron/schedule", "schedule": "5 19 * * *" }
   ]
 }
