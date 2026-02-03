@@ -1,10 +1,11 @@
 const {
   sb, tg, ik,
   TG_WEBHOOK_SECRET,
+  MINIAPP_URL,
   isCreator, setCommandsForChat,
   upsertUser, getUser, setUser,
   getChildren, getLocation,
-  locKeyboard, prefsKeyboard,
+  locKeyboard,
   userFriendlyError
 } = require("../utils");
 
@@ -24,11 +25,57 @@ module.exports = async (req, res) => {
     return res.status(200).send("ok");
   } catch (e) {
     console.error("Webhook error:", e);
+    // Telegram webhook: always 200 to avoid retries storm
     return res.status(200).send("ok");
   }
 };
 
 const USERS_PAGE_SIZE = 10;
+
+function miniAppOnlyKeyboard() {
+  if (!MINIAPP_URL) return null;
+  return {
+    reply_markup: {
+      inline_keyboard: [[{ text: "📲 Mini App", web_app: { url: MINIAPP_URL } }]]
+    }
+  };
+}
+
+async function sendSetupDone(chatId, opts = {}) {
+  const { via = "unknown" } = opts;
+
+  const statusText =
+    "✅ Manzil saqlandi.\n" +
+    "Xabarnomalarni Mini App’dan sozlashingiz mumkin.\n\n" +
+    "📌 Keyinroq botning o‘zida ham taqvim va namoz vaqtlarini ko‘rish funksiyasini qo‘shamiz.";
+
+  const mini = miniAppOnlyKeyboard();
+
+  // GPS bilan kelganda request_location klaviaturasini olib tashlaymiz
+  if (via === "gps") {
+    await tg("sendMessage", {
+      chat_id: chatId,
+      text: statusText,
+      reply_markup: { remove_keyboard: true }
+    }).catch(() => {});
+
+    if (mini) {
+      await tg("sendMessage", {
+        chat_id: chatId,
+        text: "📲 Sozlamalar uchun Mini App’ni oching:",
+        ...mini
+      }).catch(() => {});
+    }
+    return;
+  }
+
+  // List orqali tanlanganda bitta xabarda status + Mini App tugmasi
+  await tg("sendMessage", {
+    chat_id: chatId,
+    text: statusText,
+    ...(mini ? mini : {})
+  });
+}
 
 async function onMessage(msg) {
   const chatId = msg.chat.id;
@@ -37,11 +84,11 @@ async function onMessage(msg) {
   try {
     await upsertUser(tgUserId);
 
-    // 🔒 /start bosilganda shu chat uchun komandalar yangilanadi:
+    // 🔒 /start bosilganda shu user uchun komandalar yangilanadi:
     // - creator bo'lsa /users ko'rinadi
     // - oddiy user uchun /users umuman ko'rinmaydi
     if ((msg.text || "").trim().startsWith("/start")) {
-      await setCommandsForChat(chatId, isCreator(tgUserId));
+      await setCommandsForChat(chatId, isCreator(tgUserId), tgUserId);
     }
 
     // GPS yuborildi
@@ -52,38 +99,24 @@ async function onMessage(msg) {
         lat: latitude,
         lng: longitude,
         location_code: null,
-        step: "PREFS"
+        step: "READY"
       });
 
-      await tg("sendMessage", {
-        chat_id: chatId,
-        text: "✅ Lokatsiya saqlandi.",
-        reply_markup: { remove_keyboard: true }
-      });
-
-      const u = await getUser(tgUserId);
-
-      await tg("sendMessage", {
-        chat_id: chatId,
-        text: "Endi eslatmalarni sozlang:",
-        ...prefsKeyboard(u)
-      });
+      await sendSetupDone(chatId, { via: "gps" });
       return;
     }
 
     const text = (msg.text || "").trim();
 
+    // 🔒 Creator-only: userlar ro'yxati
+    // Boshqa userlar uchun javob ham bermaymiz (ko'rinmas bo'lsin)
     if (text === "/users") {
-      if (!isCreator(tgUserId)) {
-        await tg("sendMessage", { chat_id: chatId, text: "⚠️ Bu buyruq mavjud emas." });
-        return;
-      }
+      if (!isCreator(tgUserId)) return;
       await sendUsersPage({ chatId, page: 0, mode: "send" });
       return;
     }
 
     if (text === "/reset") {
-      // ❌ oldin language:null yuborilgan — users.language NOT NULL bo'lsa 23502 xato berardi
       await setUser(tgUserId, {
         step: "LANG",
         temp_parent: null,
@@ -99,7 +132,6 @@ async function onMessage(msg) {
     }
 
     if (text.startsWith("/start")) {
-      // ❌ oldin language:null yuborilgan — users.language NOT NULL bo'lsa 23502 xato berardi
       await setUser(tgUserId, {
         step: "LANG",
         temp_parent: null,
@@ -111,8 +143,8 @@ async function onMessage(msg) {
         text:
           "Assalomu alaykum! Men namoz va Ramazon vaqtlarini ko‘rsatib, eslatib turaman.\n\n" +
           "1) Til tanlaysiz\n" +
-          "2) Lokatsiyani tanlaysiz (manzil yoki GPS)\n" +
-          "3) Eslatmalarni yoqasiz\n\n" +
+          "2) Lokatsiyani tanlaysiz (viloyat → tuman) yoki 📍 GPS yuborasiz\n" +
+          "3) Xabarnomalarni Mini App’da sozlaysiz\n\n" +
           "Tilni tanlang:",
         ...ik([[{ text: "O‘zbekcha", callback_data: "lang:uz" }]])
       });
@@ -160,7 +192,7 @@ async function onCallback(cb) {
       return;
     }
 
-    // ✅ 1) Til tanlashdan keyin: lokatsiya usulini so'raymiz
+    // ======= LANGUAGE =======
     if (data.startsWith("lang:")) {
       const lang = data.split(":")[1];
 
@@ -177,7 +209,7 @@ async function onCallback(cb) {
         text:
           "✅ Til tanlandi.\n\n" +
           "Endi lokatsiyani tanlang:\n" +
-          "1) 🏙 Manzilni tanlash (viloyat → tuman → shahar)\n" +
+          "1) 🏙 Manzilni tanlash (viloyat → tuman)\n" +
           "2) 📍 Lokatsiya yuborish (GPS)\n\n" +
           "Qaysi usul qulay?",
         replyMarkup: ik([
@@ -188,7 +220,7 @@ async function onCallback(cb) {
       return;
     }
 
-    // ✅ 2) Lokatsiya usuli tanlandi
+    // ======= LOCATION MODE =======
     if (data === "locmode:gps") {
       await setUser(tgUserId, { step: "ASK_GPS" });
 
@@ -229,7 +261,7 @@ async function onCallback(cb) {
       return;
     }
 
-    // REGION select + pagination
+    // ======= REGION (viloyat) =======
     if (data.startsWith("region:")) {
       const [, code, pageStr] = data.split(":");
 
@@ -278,7 +310,7 @@ async function onCallback(cb) {
       return;
     }
 
-    // DISTRICT select + pagination
+    // ======= DISTRICT (tuman) — FINAL (CITY removed) =======
     if (data.startsWith("district:")) {
       const [, code, pageStr] = data.split(":");
 
@@ -295,51 +327,15 @@ async function onCallback(cb) {
         return;
       }
 
-      await setUser(tgUserId, { temp_parent: code, step: "CITY" });
-      const cities = await getChildren(code, "city").catch(() => []);
-
-      if (!cities.length) {
-        await safeEditText({
-          chatId,
-          messageId,
-          text: "⚠️ Shaharlar topilmadi. 📍 lokatsiya yuboring.",
-          replyMarkup: ik([[{ text: "📍 Lokatsiya yuborish", callback_data: "locmode:gps" }]]).reply_markup
-        });
-        return;
-      }
-
-      await safeEditText({
-        chatId,
-        messageId,
-        text: "Shaharni tanlang:",
-        replyMarkup: locKeyboard(cities, "city", 0, 10).reply_markup
-      });
-      return;
-    }
-
-    // CITY select + pagination
-    if (data.startsWith("city:")) {
-      const [, code, pageStr] = data.split(":");
-
-      await safeEditText({ chatId, messageId, text: "⏳ Yuklanyapti…" });
-
-      if (code === "__PAGE__") {
-        const cities = await getChildren(u.temp_parent, "city").catch(() => []);
-        await safeEditText({
-          chatId,
-          messageId,
-          text: "Shaharni tanlang:",
-          replyMarkup: locKeyboard(cities, "city", parseInt(pageStr, 10), 10).reply_markup
-        });
-        return;
-      }
-
+      // ✅ Now district selection finishes setup
       const loc = await getLocation(code);
       if (!loc?.lat || !loc?.lng) {
         await safeEditText({
           chatId,
           messageId,
-          text: "⚠️ Bu lokatsiyada koordinata yo‘q. 📍 lokatsiya yuboring.",
+          text:
+            "⚠️ Bu tumanda koordinata topilmadi.\n" +
+            "Iltimos, 📍 GPS lokatsiyangizni yuboring.",
           replyMarkup: ik([[{ text: "📍 Lokatsiya yuborish", callback_data: "locmode:gps" }]]).reply_markup
         });
         return;
@@ -349,34 +345,44 @@ async function onCallback(cb) {
         location_code: code,
         lat: loc.lat,
         lng: loc.lng,
-        step: "PREFS"
+        step: "READY"
       });
-
-      const updated = await getUser(tgUserId);
 
       await safeEditText({
         chatId,
         messageId,
-        text: "✅ Lokatsiya tanlandi. Endi eslatmalarni sozlang:",
-        replyMarkup: prefsKeyboard(updated).reply_markup
+        text:
+          "✅ Manzil saqlandi.\n" +
+          "Xabarnomalarni Mini App’dan sozlashingiz mumkin.\n\n" +
+          "📌 Keyinroq botning o‘zida ham taqvim va namoz vaqtlarini ko‘rish funksiyasini qo‘shamiz.",
+        replyMarkup: (miniAppOnlyKeyboard() || {}).reply_markup
       });
       return;
     }
 
-    // PREF toggles
-    if (data.startsWith("pref:")) {
-      const key = data.split(":")[1];
-      const patch = {};
-      patch[key] = !u[key];
-
-      await setUser(tgUserId, patch);
-      const updated = await getUser(tgUserId);
-
+    // ======= Backward compatibility: old city buttons =======
+    if (data.startsWith("city:")) {
       await safeEditText({
         chatId,
         messageId,
-        text: "✅ Saqlandi. Eslatmalar:",
-        replyMarkup: prefsKeyboard(updated).reply_markup
+        text:
+          "ℹ️ Shahar tanlash olib tashlandi.\n" +
+          "Iltimos, tumanni tanlang yoki 📍 GPS lokatsiya yuboring.",
+        replyMarkup: ik([[{ text: "📍 Lokatsiya yuborish", callback_data: "locmode:gps" }]]).reply_markup
+      });
+      return;
+    }
+
+    // ======= Old pref toggles: redirect to mini app =======
+    if (data.startsWith("pref:")) {
+      await tg("answerCallbackQuery", { callback_query_id: cb.id, text: "Sozlamalar Mini App’da 🙂" });
+      await safeEditText({
+        chatId,
+        messageId,
+        text:
+          "ℹ️ Xabarnomalarni sozlash Mini App’ga ko‘chirildi.\n" +
+          "Mini App’ni ochib sozlashingiz mumkin.",
+        replyMarkup: (miniAppOnlyKeyboard() || {}).reply_markup
       });
       return;
     }
@@ -444,16 +450,16 @@ async function sendUsersPage({ chatId, page, mode, messageId }) {
   const p = Math.max(0, Math.min(page, totalPages - 1));
 
   const rows = data || [];
-  const lines = rows.map((u, i) => {
+  const lines = rows.map((uu, i) => {
     const idx = from + i + 1;
-    const lang = u.language || "uz";
-    const loc = u.location_code ? "🏙 MANZIL" : (u.lat && u.lng ? "📍 GPS" : "—");
+    const lang = uu.language || "uz";
+    const loc = uu.location_code ? "🏙 MANZIL" : (uu.lat && uu.lng ? "📍 GPS" : "—");
     const icons =
-      (u.notify_prayers ? "🕌" : "") +
-      (u.notify_ramadan ? "🌙" : "") +
-      (u.notify_daily_morning ? "☀️" : "") +
-      (u.notify_daily_evening ? "🌆" : "");
-    return `${idx}) ${u.tg_user_id} 🌐 ${lang} ${loc} ${icons || "—"}`.trim();
+      (uu.notify_prayers ? "🕌" : "") +
+      (uu.notify_ramadan ? "🌙" : "") +
+      (uu.notify_daily_morning ? "☀️" : "") +
+      (uu.notify_daily_evening ? "🌆" : "");
+    return `${idx}) ${uu.tg_user_id} 🌐 ${lang} ${loc} ${icons || "—"}`.trim();
   });
 
   const text =

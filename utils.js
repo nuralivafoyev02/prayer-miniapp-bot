@@ -13,10 +13,8 @@ const SUPABASE_SERVICE_ROLE_KEY = mustEnv("SUPABASE_SERVICE_ROLE_KEY");
 const TG_WEBHOOK_SECRET = process.env.TG_WEBHOOK_SECRET || "";
 const MINIAPP_URL = process.env.MINIAPP_URL || "";
 
-/**
- * Creator/admin user IDs (comma-separated)
- * Example: CREATOR_TG_IDS=123456789,987654321
- */
+// Creator/admin access (comma-separated TG user IDs)
+// Example: CREATOR_TG_IDS=123456789,987654321
 const CREATOR_TG_IDS = new Set(
   String(process.env.CREATOR_TG_IDS || process.env.CREATOR_TG_ID || "")
     .split(",")
@@ -43,17 +41,19 @@ async function tg(method, payload) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload)
   });
+
   const json = await res.json();
 
   if (!json.ok) {
     const desc = String(json.description || "");
     const low = desc.toLowerCase();
 
-    // ✅ editMessageText bir xil matn bo'lsa Telegram shunday deydi — buni xato deb hisoblamaymiz
+    // ✅ Telegram “o‘zgarmadi” desa, xato deb hisoblamaymiz
     if (low.includes("message is not modified")) return null;
 
     throw new Error(`Telegram ${method} failed: ${desc}`);
   }
+
   return json.result;
 }
 
@@ -80,6 +80,8 @@ function locKeyboard(items, prefix, page, pageSize) {
   return ik(rows);
 }
 
+// (legacy) eski inline sozlamalar uchun (hozir Mini App asosiy)
+// boshqa joylar buzilmasin deb qoldirdik
 function prefsKeyboard(u) {
   const rows = [
     [{ text: `🕌 Namoz: ${u.notify_prayers ? "ON" : "OFF"}`, callback_data: "pref:notify_prayers" }],
@@ -93,24 +95,46 @@ function prefsKeyboard(u) {
   return { reply_markup: { inline_keyboard: rows } };
 }
 
+// ✅ Per-user commands: creator uchun /users ko'rinadi, boshqalar uchun yo'q
+// Eslatma: chat_member scope ishlatamiz — guruhda ham “ko‘rinmas” bo‘lib qoladi.
+async function setCommandsForChat(chatId, creator = false, userId = null) {
+  const baseCommands = [
+    { command: "start", description: "Boshlash" },
+    { command: "location", description: "Lokatsiya yuborish" },
+    { command: "reset", description: "Qayta sozlash" }
+  ];
+  const commands = creator ? baseCommands.concat([{ command: "users", description: "Userlar ro'yxati" }]) : baseCommands;
+
+  const scope = userId
+    ? { type: "chat_member", chat_id: chatId, user_id: Number(userId) }
+    : { type: "chat", chat_id: chatId };
+
+  try {
+    await tg("setMyCommands", { commands, scope });
+  } catch {
+    // ignore
+  }
+}
+
 /**
- * ✅ Muammo shu yerda edi:
- * - users.language NOT NULL bo'lsa, faqat tg_user_id bilan insert qilish (yoki language=null qilish) 23502 beradi.
- * - Shuning uchun yangi user uchun language default qilib qo'yamiz.
+ * ✅ users.language NOT NULL bo'lsa ham yiqilmaydi:
+ * - yangi user uchun language default "uz"
+ * - agar sizda users jadvalida language ustuni bo'lmasa, fallback insert qiladi
  */
 async function upsertUser(tgUserId) {
   const { data, error } = await sb.from("users").select("tg_user_id").eq("tg_user_id", tgUserId).maybeSingle();
   if (error) throw error;
 
   if (!data) {
-    // Minimal insert: tg_user_id + language (NOT NULL bo'lsa ham o'tadi)
-    const payload = { tg_user_id: tgUserId, language: "uz" };
-    const { error: insErr } = await sb.from("users").insert(payload);
+    // primary attempt: with language
+    const { error: insErr } = await sb.from("users").insert({ tg_user_id: tgUserId, language: "uz" });
 
-    // Agar sizning users jadvalingizda "language" ustuni bo'lmasa (boshqa versiya), fallback qilamiz
     if (insErr) {
       const msg = String(insErr.message || insErr || "");
-      if (msg.toLowerCase().includes("language") && (insErr.code === "42703" || msg.includes("column"))) {
+      const low = msg.toLowerCase();
+
+      // If "language" column doesn't exist in user's schema, fallback
+      if (insErr.code === "42703" || (low.includes("column") && low.includes("language"))) {
         const { error: insErr2 } = await sb.from("users").insert({ tg_user_id: tgUserId });
         if (insErr2) throw insErr2;
       } else {
@@ -165,7 +189,7 @@ function userFriendlyError(e) {
     return "⚠️ Bot token xato yoki env yo‘q. Vercel Environment Variables tekshiring.";
   }
   if (msg.includes("null value") && msg.includes("language")) {
-    return "⚠️ Baza (users.language) NOT NULL, lekin kod language=null yuboryapti. Kodni yangilang.";
+    return "⚠️ Baza (users.language) NOT NULL, lekin language null ketyapti. Kod yangilandi — qayta deploy qiling.";
   }
   return "⚠️ Texnik xatolik. Iltimos keyinroq urinib ko‘ring.";
 }
@@ -198,21 +222,25 @@ function parseMiniappUser(initData) {
   return { tg_user_id: user.id };
 }
 
-/** ====== TIMEZONE FIX ====== */
+/** ====== TIMEZONE / DATE HELPERS ====== */
 const DEFAULT_TZ = "Asia/Tashkent";
 
 function normalizeTz(input) {
   let tz = String(input || "").trim();
 
+  // ":UTC" / "::UTC" -> "UTC"
   tz = tz.replace(/^:+/, "");
   tz = tz.replace(/\s+/g, "");
 
   if (!tz) return DEFAULT_TZ;
 
+  // ko‘p uchraydigan nomlar
   if (tz === "UTC" || tz === "GMT") tz = "Etc/UTC";
 
+  // "UTC+5" kabi yozuvlar Intl’ga to‘g‘ri kelmaydi -> fallback
   if (/^UTC[+-]\d{1,2}$/.test(tz)) return DEFAULT_TZ;
 
+  // tekshiruv: Intl qabul qiladimi?
   try {
     new Intl.DateTimeFormat("en-GB", { timeZone: tz }).format(new Date());
     return tz;
@@ -223,17 +251,8 @@ function normalizeTz(input) {
 
 const APP_TZ = normalizeTz(process.env.APP_TZ || DEFAULT_TZ);
 
-function fmtTime(date, tz = APP_TZ) {
-  const z = normalizeTz(tz);
-  return new Intl.DateTimeFormat("en-GB", {
-    timeZone: z,
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false
-  }).format(date);
-}
-
-function tzDate(tz = APP_TZ, addDays = 0) {
+// Date object that represents "that day in tz" safely (midday UTC avoids day-shift issues)
+function tzDate(tz, addDays = 0) {
   const z = normalizeTz(tz);
   const now = new Date(Date.now() + addDays * 86400000);
 
@@ -252,11 +271,20 @@ function tzDate(tz = APP_TZ, addDays = 0) {
   return new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
 }
 
-function tzYMD(tz = APP_TZ, addDays = 0) {
+function fmtTime(dateObj, tz) {
+  const z = normalizeTz(tz);
+  return new Intl.DateTimeFormat("uz-UZ", {
+    timeZone: z,
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(dateObj);
+}
+
+function tzYMD(tz, addDays = 0) {
   return tzDate(tz, addDays).toISOString().slice(0, 10);
 }
 
-function islamicMonth(tz = APP_TZ, dateObj = new Date()) {
+function islamicMonth(tz, dateObj = new Date()) {
   const z = normalizeTz(tz);
   try {
     const parts = new Intl.DateTimeFormat("en-u-ca-islamic", {
@@ -272,7 +300,9 @@ function islamicMonth(tz = APP_TZ, dateObj = new Date()) {
 }
 
 /**
- * ✅ isRamadanToday endi hech qachon crash bermaydi (fallbacklar bilan)
+ * ✅ Ramazon bugunmi?
+ * 1) RAMADAN_START / RAMADAN_END env bo'lsa — shuni ishlatadi
+ * 2) bo'lmasa — islamic calendar month=9 fallback
  */
 async function isRamadanToday(tz = APP_TZ) {
   const z = normalizeTz(tz);
@@ -282,6 +312,7 @@ async function isRamadanToday(tz = APP_TZ) {
   const end = String(process.env.RAMADAN_END || "").slice(0, 10);
   if (start && end) return ymd >= start && ymd <= end;
 
+  // Optional table (if you add later): ramadan_periods(starts_on, ends_on)
   try {
     const { data, error } = await sb
       .from("ramadan_periods")
@@ -299,27 +330,6 @@ async function isRamadanToday(tz = APP_TZ) {
   return m === 9;
 }
 
-/**
- * Creator uchun /users komandasi faqat o'sha chatda ko'rinishi uchun.
- */
-async function setCommandsForChat(chatId, creator = false) {
-  const base = [
-    { command: "start", description: "Boshlash" },
-    { command: "location", description: "Lokatsiya yuborish" },
-    { command: "reset", description: "Qayta sozlash" }
-  ];
-  const commands = creator ? base.concat([{ command: "users", description: "Userlar ro'yxati" }]) : base;
-
-  try {
-    await tg("setMyCommands", {
-      commands,
-      scope: { type: "chat", chat_id: chatId }
-    });
-  } catch {
-    // ignore
-  }
-}
-
 module.exports = {
   sb, tg, ik,
   BOT_TOKEN, TG_WEBHOOK_SECRET, MINIAPP_URL,
@@ -329,11 +339,8 @@ module.exports = {
   getChildren, getLocation,
   locKeyboard, prefsKeyboard,
   userFriendlyError,
-  parseMiniappUser,
-  isRamadanToday,
-  APP_TZ,
-  normalizeTz,
-  fmtTime,
-  tzDate,
-  tzYMD
+  validateInitData, parseMiniappUser,
+  DEFAULT_TZ, APP_TZ, normalizeTz,
+  tzDate, fmtTime, tzYMD,
+  isRamadanToday
 };
