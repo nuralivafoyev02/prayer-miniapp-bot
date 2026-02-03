@@ -34,11 +34,13 @@ module.exports = async (req, res) => {
       .not("lng", "is", null);
 
     if (error) throw error;
+    
+
     const ramadan = await isRamadanToday();
 
-    const tz = APP_TZ;          // ✅ SHU YERDA
-    const today = tzDate(tz, 0);
-    const tomorrow = tzDate(tz, 1);
+    const now = new Date();
+    const today = now;
+    const tomorrow = new Date(now.getTime() + 86400000);
 
     for (const u of users || []) {
       const t1 = prayerTimes(u.lat, u.lng, today);
@@ -49,14 +51,14 @@ module.exports = async (req, res) => {
         await tg("sendMessage", {
           chat_id: u.tg_user_id,
           text: `☀️ Bugungi namoz vaqtlari:\n${lines(mapTimes(t1))}${ramadan && u.notify_ramadan ? "\n\n🌙 Ramazon eslatmalari ON" : ""}`
-        }).catch(() => { });
+        }).catch(() => {});
       }
 
       if (u.notify_daily_evening) {
         await tg("sendMessage", {
           chat_id: u.tg_user_id,
           text: `🌆 Ertangi namoz vaqtlari:\n${lines(mapTimes(t2))}${ramadan && u.notify_ramadan ? "\n\n🌙 Ramazon eslatmalari ON" : ""}`
-        }).catch(() => { });
+        }).catch(() => {});
       }
 
       // Real-time uchun queue tayyorlab qo'yamiz (cron-tick bilan jo'natish mumkin)
@@ -77,7 +79,7 @@ module.exports = async (req, res) => {
       }
 
       if (inserts.length) {
-        await sb.from("notifications").insert(inserts).catch(() => { });
+        await sb.from("notifications").insert(inserts).catch(() => {});
       }
     }
 
