@@ -1,11 +1,9 @@
 {
-  "trailingSlash": false,
-  "redirects": [
-    { "source": "/", "destination": "/mini/", "permanent": false },
-    { "source": "/mini", "destination": "/mini/", "permanent": false }
-  ],
   "crons": [
-    { "path": "/api/cron/cache", "schedule": "3 19 * * *" },
-    { "path": "/api/cron/schedule", "schedule": "5 19 * * *" }
+    { "path": "/api/cron-tick",  "schedule": "* * * * *" },
+    { "path": "/api/cron-daily", "schedule": "5 19 * * *" }
+  ],
+  "rewrites": [
+    { "source": "/miniapp", "destination": "/miniapp/index.html" }
   ]
 }

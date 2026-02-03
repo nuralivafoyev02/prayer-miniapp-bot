@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="uz">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Namoz & Ramazon</title>
+  <link rel="stylesheet" href="./styles.css" />
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+  <div class="bg"></div>
+
+  <main class="app" id="app">
+    <header class="top">
+      <div>
+        <h1>Namoz & Ramazon</h1>
+        <p class="sub" id="place">Yuklanmoqda…</p>
+      </div>
+      <div class="chip" id="statusChip">Online</div>
+    </header>
+
+    <section class="card">
+      <div class="cardHead">
+        <h2>Bugun</h2>
+        <span class="badge" id="todayDate"></span>
+      </div>
+      <div class="grid" id="today"></div>
+    </section>
+
+    <section class="card">
+      <div class="cardHead">
+        <h2>Ertaga</h2>
+        <span class="badge" id="tomorrowDate"></span>
+      </div>
+      <div class="grid" id="tomorrow"></div>
+    </section>
+
+    <section class="card">
+      <div class="cardHead">
+        <h2>Eslatmalar</h2>
+        <span class="badge">Sozlamalar</span>
+      </div>
+      <div class="toggles" id="toggles"></div>
+    </section>
+
+    <footer class="foot">
+      <span class="hint">⚠️ Vaqtlar lokatsiyangizga qarab hisoblanadi.</span>
+    </footer>
+  </main>
+
+  <script src="./app.js"></script>
+</body>
+</html>
