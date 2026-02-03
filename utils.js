@@ -105,6 +105,10 @@ async function getLocation(code) {
 
 function userFriendlyError(e) {
   const msg = String(e?.message || e || "");
+
+  if (msg.includes("Invalid time zone") || msg.includes("time zone specified")) {
+    return "⚠️ Timezone xato kelmoqda. Admin Vercel env'ga APP_TZ=Asia/Tashkent qo‘ysin.";
+  }
   if (msg.includes("PGRST205") && msg.includes("locations")) {
     return "⚠️ Lokatsiya bazasi hali yuklanmagan (locations).\nHozircha 📍 lokatsiyangizni yuboring.";
   }
@@ -145,22 +149,40 @@ function parseMiniappUser(initData) {
   return { tg_user_id: user.id };
 }
 
-async function isRamadanToday() {
-  const d = new Date().toISOString().slice(0, 10);
-  const { data, error } = await sb
-    .from("ramadan_periods")
-    .select("*")
-    .lte("starts_on", d)
-    .gte("ends_on", d)
-    .limit(1);
-  if (error) throw error;
-  return (data || []).length > 0;
+/** ====== TIMEZONE FIX (ASOSIY TUZATISH) ====== */
+const DEFAULT_TZ = "Asia/Tashkent";
+
+function normalizeTz(input) {
+  let tz = String(input || "").trim();
+
+  // ":UTC" / "::UTC" -> "UTC"
+  tz = tz.replace(/^:+/, "");
+  tz = tz.replace(/\s+/g, "");
+
+  if (!tz) return DEFAULT_TZ;
+
+  // ko‘p uchraydigan nomlar
+  if (tz === "UTC" || tz === "GMT") tz = "Etc/UTC";
+
+  // "UTC+5" kabi yozuvlar Intl’ga to‘g‘ri kelmaydi -> fallback
+  if (/^UTC[+-]\d{1,2}$/.test(tz)) return DEFAULT_TZ;
+
+  // tekshiruv: Intl qabul qiladimi?
+  try {
+    new Intl.DateTimeFormat("en-GB", { timeZone: tz }).format(new Date());
+    return tz;
+  } catch {
+    return DEFAULT_TZ;
+  }
 }
-const APP_TZ = process.env.APP_TZ || process.env.TZ || "Asia/Tashkent";
+
+// MUHIM: endi process.env.TZ’ga tayanmaymiz (Vercel’da :UTC bo‘lib keladi)
+const APP_TZ = normalizeTz(process.env.APP_TZ || DEFAULT_TZ);
 
 function fmtTime(date, tz = APP_TZ) {
+  const z = normalizeTz(tz);
   return new Intl.DateTimeFormat("en-GB", {
-    timeZone: tz,
+    timeZone: z,
     hour: "2-digit",
     minute: "2-digit",
     hour12: false
@@ -169,10 +191,11 @@ function fmtTime(date, tz = APP_TZ) {
 
 // Toshkent bo'yicha "bugun" sanasini aniq olish (server UTC bo'lsa ham)
 function tzDate(tz = APP_TZ, addDays = 0) {
+  const z = normalizeTz(tz);
   const now = new Date(Date.now() + addDays * 86400000);
 
   const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: tz,
+    timeZone: z,
     year: "numeric",
     month: "2-digit",
     day: "2-digit"
@@ -187,6 +210,23 @@ function tzDate(tz = APP_TZ, addDays = 0) {
   return new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
 }
 
+function tzYMD(tz = APP_TZ, addDays = 0) {
+  // tzDate UTC noon bo'lgani uchun ISO date qismi doim to'g'ri chiqadi
+  return tzDate(tz, addDays).toISOString().slice(0, 10);
+}
+
+async function isRamadanToday() {
+  // oldin UTC bo‘yicha olinyapti edi; endi APP_TZ bo‘yicha olamiz
+  const d = tzYMD(APP_TZ, 0);
+  const { data, error } = await sb
+    .from("ramadan_periods")
+    .select("*")
+    .lte("starts_on", d)
+    .gte("ends_on", d)
+    .limit(1);
+  if (error) throw error;
+  return (data || []).length > 0;
+}
 
 module.exports = {
   sb, tg, ik,
@@ -198,6 +238,8 @@ module.exports = {
   parseMiniappUser,
   isRamadanToday,
   APP_TZ,
+  normalizeTz,
   fmtTime,
   tzDate,
+  tzYMD
 };
