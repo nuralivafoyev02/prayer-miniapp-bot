@@ -426,14 +426,24 @@ async function sendUsersPage(chatId, page, opts = { mode: "send" }) {
   const reply_markup = { inline_keyboard: [navRow] };
 
   if (opts.mode === "edit" && opts.messageId) {
-    await tg("editMessageText", {
-      chat_id: chatId,
-      message_id: opts.messageId,
-      text,
-      reply_markup
-    });
+    try {
+      await tg("editMessageText", {
+        chat_id: chatId,
+        message_id: opts.messageId,
+        text,
+        reply_markup
+      });
+    } catch (e) {
+      const msg = String(e?.message || e || "").toLowerCase();
+      if (msg.includes("can't be edited") || msg.includes("message to edit not found")) {
+        await tg("sendMessage", { chat_id: chatId, text, reply_markup });
+        return;
+      }
+      throw e;
+    }
     return;
   }
+
 
   await tg("sendMessage", {
     chat_id: chatId,

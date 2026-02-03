@@ -41,10 +41,22 @@ async function tg(method, payload) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload)
   });
+
   const json = await res.json();
-  if (!json.ok) throw new Error(`Telegram ${method} failed: ${json.description}`);
+
+  if (!json.ok) {
+    const desc = String(json.description || "");
+    const low = desc.toLowerCase();
+
+    // ✅ Telegram “o‘zgarmadi” desa, xato deb hisoblamaymiz
+    if (low.includes("message is not modified")) return null;
+
+    throw new Error(`Telegram ${method} failed: ${desc}`);
+  }
+
   return json.result;
 }
+
 
 function ik(rows) {
   return { reply_markup: { inline_keyboard: rows } };
