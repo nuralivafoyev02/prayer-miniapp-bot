@@ -1,5 +1,6 @@
 const adhan = require("adhan");
-const { sb, parseMiniappUser, isRamadanToday, APP_TZ, fmtTime, tzDate } = require("../utils");
+const utils = require("../utils");
+const { sb, parseMiniappUser, isRamadanToday, APP_TZ, fmtTime, tzDate } = utils;
 
 function prayerTimes(lat, lng, date, tz) {
   const coords = new adhan.Coordinates(lat, lng);
@@ -24,7 +25,7 @@ module.exports = async (req, res) => {
     const { initData } = req.body || {};
     if (!initData) return res.status(400).json({ ok: false, error: "NO_INIT_DATA" });
 
-    // 🔎 1) utils export tekshiruv (sizdagi real muammoni darrov chiqaradi)
+    // 1) utils export tekshiruv
     if (typeof tzDate !== "function" || typeof fmtTime !== "function") {
       return res.status(500).json({
         ok: false,
@@ -33,7 +34,12 @@ module.exports = async (req, res) => {
       });
     }
 
-    // 🔐 2) initData parse faqat shunda 401 bo'lsin
+    // isRamadanToday export bo'lmasa ham (deploy mismatch), miniapp yiqilib ketmasin
+    if (typeof isRamadanToday !== "function") {
+      console.warn("utils.js dan isRamadanToday export qilinmagan — ramadan=false bo'ladi");
+    }
+
+    // 2) initData parse
     let tg_user_id;
     try {
       ({ tg_user_id } = parseMiniappUser(initData));
@@ -54,7 +60,8 @@ module.exports = async (req, res) => {
     const today = tzDate(tz, 0);
     const tomorrow = tzDate(tz, 1);
 
-    const ramadan = await isRamadanToday();
+    // ✅ isRamadanToday yo'q bo'lsa ham miniapp yiqilmasin
+    const ramadan = typeof isRamadanToday === "function" ? await isRamadanToday(tz) : false;
 
     return res.status(200).json({
       ok: true,
@@ -71,7 +78,6 @@ module.exports = async (req, res) => {
     });
   } catch (e) {
     console.error("miniapp-me error:", e);
-    // ❗ Endi "Unauthorized" emas — real server error qaytadi
     return res.status(500).json({ ok: false, error: "SERVER_ERROR", details: String(e.message || e) });
   }
 };

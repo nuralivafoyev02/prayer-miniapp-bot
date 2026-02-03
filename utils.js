@@ -57,7 +57,6 @@ async function tg(method, payload) {
   return json.result;
 }
 
-
 function ik(rows) {
   return { reply_markup: { inline_keyboard: rows } };
 }
@@ -253,6 +252,73 @@ function tzYMD(tz, addDays = 0) {
   return d.toISOString().slice(0, 10);
 }
 
+// ===== RAMADAN CHECK (safe & non-breaking) =====
+let _ramadanCache = { key: "", value: false };
+
+function islamicMonth(tz = APP_TZ, dateObj = new Date()) {
+  const z = normalizeTz(tz);
+  try {
+    const parts = new Intl.DateTimeFormat("en-u-ca-islamic", {
+      timeZone: z,
+      month: "numeric"
+    }).formatToParts(dateObj);
+    const m = parts.find(p => p.type === "month")?.value;
+    const n = Number(m);
+    return Number.isFinite(n) ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Ramadan today?
+ * - Uses RAMADAN_START / RAMADAN_END env vars if present (YYYY-MM-DD)
+ * - Else tries Supabase table `ramadan_periods` (starts_on, ends_on)
+ * - Else fallback to islamic calendar (month 9)
+ *
+ * IMPORTANT: never throws (so miniapp/cron won't crash).
+ */
+async function isRamadanToday(tz = APP_TZ) {
+  const z = normalizeTz(tz);
+  const ymd = tzYMD(z, 0);
+  const cacheKey = `${z}:${ymd}`;
+  if (_ramadanCache.key === cacheKey) return _ramadanCache.value;
+
+  // 1) ENV override
+  const start = String(process.env.RAMADAN_START || "").slice(0, 10);
+  const end = String(process.env.RAMADAN_END || "").slice(0, 10);
+  if (start && end) {
+    const value = ymd >= start && ymd <= end;
+    _ramadanCache = { key: cacheKey, value };
+    return value;
+  }
+
+  // 2) DB table check (optional)
+  try {
+    const { data, error } = await sb
+      .from("ramadan_periods")
+      .select("id")
+      .lte("starts_on", ymd)
+      .gte("ends_on", ymd)
+      .limit(1);
+
+    if (!error) {
+      const value = (data || []).length > 0;
+      _ramadanCache = { key: cacheKey, value };
+      return value;
+    }
+    // If table/columns don't exist — ignore and fallback
+  } catch {
+    // ignore and fallback
+  }
+
+  // 3) Fallback: islamic calendar month 9
+  const m = islamicMonth(z, tzDate(z, 0));
+  const value = m === 9;
+  _ramadanCache = { key: cacheKey, value };
+  return value;
+}
+
 module.exports = {
   sb, tg, ik,
   BOT_TOKEN, TG_WEBHOOK_SECRET, MINIAPP_URL,
@@ -264,5 +330,6 @@ module.exports = {
   userFriendlyError,
   validateInitData, parseMiniappUser,
   DEFAULT_TZ, APP_TZ, normalizeTz,
-  tzDate, fmtTime, tzYMD
+  tzDate, fmtTime, tzYMD,
+  isRamadanToday
 };

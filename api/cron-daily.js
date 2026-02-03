@@ -1,7 +1,10 @@
 const adhan = require("adhan");
 const { sb, tg, isRamadanToday, APP_TZ, fmtTime, tzDate } = require("../utils");
 
-function hhmm(d) { return new Date(d).toTimeString().slice(0, 5); }
+function hhmm(d, tz) {
+  // server timezone UTC bo'lishi mumkin, shuning uchun Intl orqali formatlaymiz
+  return fmtTime(new Date(d), tz);
+}
 
 function prayerTimes(lat, lng, date) {
   const coords = new adhan.Coordinates(lat, lng);
@@ -22,7 +25,6 @@ function mapTimes(t, tz) {
   };
 }
 
-
 module.exports = async (req, res) => {
   try {
     if (req.method !== "GET") return res.status(405).send("Method not allowed");
@@ -34,19 +36,18 @@ module.exports = async (req, res) => {
       .not("lng", "is", null);
 
     if (error) throw error;
-    
 
-    const ramadan = await isRamadanToday();
+    const tz = APP_TZ || "Asia/Tashkent";
+    const ramadan = typeof isRamadanToday === "function" ? await isRamadanToday(tz) : false;
 
-    const now = new Date();
-    const today = now;
-    const tomorrow = new Date(now.getTime() + 86400000);
+    // timezone bo'yicha bugun/ertani aniq olish
+    const today = tzDate(tz, 0);
+    const tomorrow = tzDate(tz, 1);
 
     for (const u of users || []) {
       const t1 = prayerTimes(u.lat, u.lng, today);
       const t2 = prayerTimes(u.lat, u.lng, tomorrow);
 
-      // Ertalab/kechqurun xabar yuborish (to'g'ridan-to'g'ri)
       if (u.notify_daily_morning) {
         await tg("sendMessage", {
           chat_id: u.tg_user_id,
@@ -61,7 +62,6 @@ module.exports = async (req, res) => {
         }).catch(() => {});
       }
 
-      // Real-time uchun queue tayyorlab qo'yamiz (cron-tick bilan jo'natish mumkin)
       const inserts = [];
       if (u.notify_prayers) {
         inserts.push(n(u.tg_user_id, t1.fajr, "prayer_fajr", { name: "Bomdod" }));
@@ -71,9 +71,9 @@ module.exports = async (req, res) => {
         inserts.push(n(u.tg_user_id, t1.isha, "prayer_isha", { name: "Xufton" }));
       }
       if (ramadan && u.notify_ramadan) {
-        inserts.push(n(u.tg_user_id, t1.fajr, "suhoor", { time: hhmm(t1.fajr) }));
+        inserts.push(n(u.tg_user_id, t1.fajr, "suhoor", { time: hhmm(t1.fajr, tz) }));
         inserts.push(n(u.tg_user_id, t1.maghrib, "iftar", {
-          time: hhmm(t1.maghrib),
+          time: hhmm(t1.maghrib, tz),
           dua: "Allohumma inni laka sumtu wa bika aamantu wa ‘alayka tawakkaltu wa ‘ala rizqika aftartu."
         }));
       }
