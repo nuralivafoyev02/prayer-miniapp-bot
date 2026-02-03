@@ -13,6 +13,23 @@ const SUPABASE_SERVICE_ROLE_KEY = mustEnv("SUPABASE_SERVICE_ROLE_KEY");
 const TG_WEBHOOK_SECRET = process.env.TG_WEBHOOK_SECRET || "";
 const MINIAPP_URL = process.env.MINIAPP_URL || "";
 
+// Creator/admin access (comma-separated TG user IDs)
+// Example: CREATOR_TG_IDS=123456789,987654321
+const CREATOR_TG_IDS = new Set(
+  String(process.env.CREATOR_TG_IDS || process.env.CREATOR_TG_ID || "")
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean)
+    .map(s => Number(s))
+    .filter(n => Number.isFinite(n))
+);
+
+function isCreator(tgUserId) {
+  const id = Number(tgUserId);
+  if (!Number.isFinite(id)) return false;
+  return CREATOR_TG_IDS.has(id);
+}
+
 const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { persistSession: false }
 });
@@ -63,6 +80,28 @@ function prefsKeyboard(u) {
   if (MINIAPP_URL) rows.push([{ text: "📲 Mini App", web_app: { url: MINIAPP_URL } }]);
 
   return { reply_markup: { inline_keyboard: rows } };
+}
+
+// ✅ Chat-scoped commands: creator uchun /users ko'rinadi, boshqalar uchun yo'q
+async function setCommandsForChat(chatId, creator = false) {
+  const baseCommands = [
+    { command: "start", description: "Boshlash" },
+    { command: "location", description: "Lokatsiya yuborish" },
+    { command: "reset", description: "Qayta sozlash" }
+  ];
+  const commands = creator
+    ? baseCommands.concat([{ command: "users", description: "Userlar ro'yxati" }])
+    : baseCommands;
+
+  // Per-chat scope: shuning uchun /users boshqalarga “hatto ko'rinmaydi”
+  try {
+    await tg("setMyCommands", {
+      commands,
+      scope: { type: "chat", chat_id: chatId }
+    });
+  } catch {
+    // ignore (Telegram ba'zida rate limit / scope xatolari bo'lishi mumkin)
+  }
 }
 
 async function upsertUser(tgUserId) {
@@ -176,70 +215,42 @@ function normalizeTz(input) {
   }
 }
 
-// MUHIM: endi process.env.TZ’ga tayanmaymiz (Vercel’da :UTC bo‘lib keladi)
 const APP_TZ = normalizeTz(process.env.APP_TZ || DEFAULT_TZ);
 
-function fmtTime(date, tz = APP_TZ) {
-  const z = normalizeTz(tz);
-  return new Intl.DateTimeFormat("en-GB", {
-    timeZone: z,
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false
-  }).format(date);
-}
-
-// Toshkent bo'yicha "bugun" sanasini aniq olish (server UTC bo'lsa ham)
-function tzDate(tz = APP_TZ, addDays = 0) {
-  const z = normalizeTz(tz);
-  const now = new Date(Date.now() + addDays * 86400000);
-
+function tzDate(tz, addDays = 0) {
+  const now = new Date();
   const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: z,
+    timeZone: tz,
     year: "numeric",
     month: "2-digit",
     day: "2-digit"
   }).formatToParts(now);
-
-  const get = (t) => parts.find(p => p.type === t)?.value;
-  const y = Number(get("year"));
-  const m = Number(get("month"));
-  const d = Number(get("day"));
-
-  // UTC muhitida ham y/m/d to'g'ri bo'lishi uchun UTC noon
-  return new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+  const y = parts.find(p => p.type === "year").value;
+  const m = parts.find(p => p.type === "month").value;
+  const d = parts.find(p => p.type === "day").value;
+  const base = new Date(`${y}-${m}-${d}T00:00:00.000Z`);
+  return new Date(base.getTime() + addDays * 86400000);
 }
 
-function tzYMD(tz = APP_TZ, addDays = 0) {
-  // tzDate UTC noon bo'lgani uchun ISO date qismi doim to'g'ri chiqadi
-  return tzDate(tz, addDays).toISOString().slice(0, 10);
+function fmtTime(dateObj, tz) {
+  return new Intl.DateTimeFormat("uz-UZ", { timeZone: tz, hour: "2-digit", minute: "2-digit" }).format(dateObj);
 }
 
-async function isRamadanToday() {
-  // oldin UTC bo‘yicha olinyapti edi; endi APP_TZ bo‘yicha olamiz
-  const d = tzYMD(APP_TZ, 0);
-  const { data, error } = await sb
-    .from("ramadan_periods")
-    .select("*")
-    .lte("starts_on", d)
-    .gte("ends_on", d)
-    .limit(1);
-  if (error) throw error;
-  return (data || []).length > 0;
+function tzYMD(tz, addDays = 0) {
+  const d = tzDate(tz, addDays);
+  return d.toISOString().slice(0, 10);
 }
 
 module.exports = {
   sb, tg, ik,
   BOT_TOKEN, TG_WEBHOOK_SECRET, MINIAPP_URL,
+  isCreator,
+  setCommandsForChat,
   upsertUser, getUser, setUser,
   getChildren, getLocation,
   locKeyboard, prefsKeyboard,
   userFriendlyError,
-  parseMiniappUser,
-  isRamadanToday,
-  APP_TZ,
-  normalizeTz,
-  fmtTime,
-  tzDate,
-  tzYMD
+  validateInitData, parseMiniappUser,
+  DEFAULT_TZ, APP_TZ, normalizeTz,
+  tzDate, fmtTime, tzYMD
 };

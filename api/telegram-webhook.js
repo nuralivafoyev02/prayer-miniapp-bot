@@ -1,6 +1,8 @@
 const {
-  tg, ik,
+  sb, tg, ik,
   TG_WEBHOOK_SECRET,
+  isCreator,
+  setCommandsForChat,
   upsertUser, getUser, setUser,
   getChildren, getLocation,
   locKeyboard, prefsKeyboard,
@@ -64,6 +66,16 @@ async function onMessage(msg) {
 
     const text = (msg.text || "").trim();
 
+    // 🔒 Creator-only: userlar ro'yxati
+    // Boshqa userlar uchun javob ham bermaymiz (ko'rinmas bo'lsin)
+    if (text.startsWith("/users")) {
+      if (!isCreator(tgUserId)) return;
+      const parts = text.split(/\s+/);
+      const page = Math.max(0, Number(parts[1] || 0) || 0);
+      await sendUsersPage(chatId, page, { mode: "send" });
+      return;
+    }
+
     if (text === "/reset") {
       await setUser(tgUserId, {
         step: "LANG",
@@ -71,6 +83,9 @@ async function onMessage(msg) {
         temp_parent: null,
         location_code: null
       });
+
+      // creator bo'lsa /users komandasi shu chatda ko'rinsin
+      await setCommandsForChat(chatId, isCreator(tgUserId));
       await sendLang(chatId);
       return;
     }
@@ -87,6 +102,9 @@ async function onMessage(msg) {
         temp_parent: null,
         location_code: null
       });
+
+      // creator bo'lsa /users komandasi faqat shu chatda chiqadi
+      await setCommandsForChat(chatId, isCreator(tgUserId));
 
       await tg("sendMessage", {
         chat_id: chatId,
@@ -128,6 +146,14 @@ async function onCallback(cb) {
     await tg("answerCallbackQuery", { callback_query_id: cb.id, text: "⏳ Yuklanyapti…" });
 
     const data = cb.data || "";
+
+    // 🔒 Creator-only pagination: userlar ro'yxati
+    if (data.startsWith("adminusers:")) {
+      if (!isCreator(tgUserId)) return;
+      const page = Math.max(0, Number(data.split(":")[1] || 0) || 0);
+      await sendUsersPage(chatId, page, { mode: "edit", messageId });
+      return;
+    }
 
     // ✅ 1) Til tanlashdan keyin: lokatsiya usulini so'raymiz
     if (data.startsWith("lang:")) {
@@ -377,4 +403,95 @@ async function askForLocation(chatId) {
 
 async function safeGetRegions() {
   return await getChildren(null, "region").catch(() => []);
+}
+
+/** =====================
+ *  Creator-only /users
+ * ===================== */
+const USERS_PAGE_SIZE = 20;
+
+async function sendUsersPage(chatId, page, opts = { mode: "send" }) {
+  const { rows, total } = await fetchUsersPage(page);
+  const text = renderUsersText(rows, page, total);
+
+  const hasPrev = page > 0;
+  const totalPages = typeof total === "number" ? Math.max(1, Math.ceil(total / USERS_PAGE_SIZE)) : null;
+  const hasNext = totalPages ? page < totalPages - 1 : rows.length === USERS_PAGE_SIZE;
+
+  const navRow = [];
+  if (hasPrev) navRow.push({ text: "⬅️", callback_data: `adminusers:${page - 1}` });
+  navRow.push({ text: "🔄", callback_data: `adminusers:${page}` });
+  if (hasNext) navRow.push({ text: "➡️", callback_data: `adminusers:${page + 1}` });
+
+  const reply_markup = { inline_keyboard: [navRow] };
+
+  if (opts.mode === "edit" && opts.messageId) {
+    await tg("editMessageText", {
+      chat_id: chatId,
+      message_id: opts.messageId,
+      text,
+      reply_markup
+    });
+    return;
+  }
+
+  await tg("sendMessage", {
+    chat_id: chatId,
+    text,
+    reply_markup
+  });
+}
+
+async function fetchUsersPage(page) {
+  const from = page * USERS_PAGE_SIZE;
+  const to = from + USERS_PAGE_SIZE - 1;
+
+  const { data, error, count } = await sb
+    .from("users")
+    .select(
+      "tg_user_id,language,location_code,lat,lng,notify_prayers,notify_ramadan,notify_daily_morning,notify_daily_evening,created_at,updated_at",
+      { count: "exact" }
+    )
+    .order("updated_at", { ascending: false })
+    .range(from, to);
+
+  if (error) throw error;
+  return { rows: data || [], total: typeof count === "number" ? count : null };
+}
+
+function renderUsersText(rows, page, total) {
+  const head = [
+    "👤 Userlar ro'yxati",
+    total != null
+      ? `Sahifa: ${page + 1}/${Math.max(1, Math.ceil(total / USERS_PAGE_SIZE))} | Jami: ${total}`
+      : `Sahifa: ${page + 1}`,
+    ""
+  ].join("\n");
+
+  if (!rows.length) return head + "Hali user yo'q.";
+
+  const lines = rows.map((u, i) => {
+    const idx = page * USERS_PAGE_SIZE + i + 1;
+    const prefs = prefIcons(u);
+    const loc = locLabel(u);
+    const lang = u.language ? `🌐${u.language}` : "";
+    return `${idx}) ${u.tg_user_id}  ${lang} ${loc}  ${prefs}`.trim();
+  });
+
+  return head + lines.join("\n");
+}
+
+function prefIcons(u) {
+  let s = "";
+  if (u.notify_prayers) s += "🕌";
+  if (u.notify_ramadan) s += "🌙";
+  if (u.notify_daily_morning) s += "☀️";
+  if (u.notify_daily_evening) s += "🌆";
+  return s || "—";
+}
+
+function locLabel(u) {
+  if (u.lat != null && u.lng != null) return "📍GPS";
+  if (u.location_code) return `🏙${u.location_code}`;
+  return "";
 }
