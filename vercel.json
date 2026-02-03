@@ -4,6 +4,8 @@
     { "path": "/api/cron-daily", "schedule": "5 19 * * *" }
   ],
   "rewrites": [
-    { "source": "/miniapp", "destination": "/miniapp/index.html" }
+    { "source": "/", "destination": "/miniapp/index.html" },
+    { "source": "/miniapp", "destination": "/miniapp/index.html" },
+    { "source": "/miniapp/", "destination": "/miniapp/index.html" }
   ]
 }
