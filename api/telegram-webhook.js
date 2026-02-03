@@ -37,12 +37,26 @@ async function onMessage(msg) {
     // GPS yuborildi
     if (msg.location) {
       const { latitude, longitude } = msg.location;
-      await setUser(tgUserId, { lat: latitude, lng: longitude, step: "PREFS" });
+
+      await setUser(tgUserId, {
+        lat: latitude,
+        lng: longitude,
+        location_code: null,
+        step: "PREFS"
+      });
+
+      // reply keyboardni olib tashlaymiz (chiroyli UX)
+      await tg("sendMessage", {
+        chat_id: chatId,
+        text: "✅ Lokatsiya saqlandi.",
+        reply_markup: { remove_keyboard: true }
+      });
+
       const u = await getUser(tgUserId);
 
       await tg("sendMessage", {
         chat_id: chatId,
-        text: "✅ Lokatsiya saqlandi. Endi eslatmalarni sozlang:",
+        text: "Endi eslatmalarni sozlang:",
         ...prefsKeyboard(u)
       });
       return;
@@ -51,7 +65,12 @@ async function onMessage(msg) {
     const text = (msg.text || "").trim();
 
     if (text === "/reset") {
-      await setUser(tgUserId, { step: "LANG", temp_parent: null, location_code: null });
+      await setUser(tgUserId, {
+        step: "LANG",
+        language: null,
+        temp_parent: null,
+        location_code: null
+      });
       await sendLang(chatId);
       return;
     }
@@ -62,23 +81,33 @@ async function onMessage(msg) {
     }
 
     if (text.startsWith("/start")) {
-      await setUser(tgUserId, { step: "LANG" });
+      await setUser(tgUserId, {
+        step: "LANG",
+        language: null,
+        temp_parent: null,
+        location_code: null
+      });
+
       await tg("sendMessage", {
         chat_id: chatId,
         text:
-          "Assalomu alaykum! Men namoz va Ramazon vaqtlarini eslatib turaman.\n\n" +
-          "1) Til tanlaysiz\n2) Viloyat → tuman → shahar (agar baza bo‘lsa)\n3) Bo‘lmasa 📍 lokatsiya yuborasiz\n\nTilni tanlang:",
-        ...ik([
-          [{ text: "O‘zbekcha", callback_data: "lang:uz" }]
-        ])
+          "Assalomu alaykum! Men namoz va Ramazon vaqtlarini ko‘rsatib, eslatib turaman.\n\n" +
+          "1) Til tanlaysiz\n" +
+          "2) Lokatsiyani tanlaysiz (manzil yoki GPS)\n" +
+          "3) Eslatmalarni yoqasiz\n\n" +
+          "Tilni tanlang:",
+        ...ik([[{ text: "O‘zbekcha", callback_data: "lang:uz" }]])
       });
       return;
     }
 
-    // oddiy xabar
     await tg("sendMessage", {
       chat_id: chatId,
-      text: "Buyruqlar:\n/start — boshlash\n/location — lokatsiya yuborish\n/reset — qayta sozlash"
+      text:
+        "Buyruqlar:\n" +
+        "/start — boshlash\n" +
+        "/location — lokatsiya yuborish\n" +
+        "/reset — qayta sozlash"
     });
   } catch (e) {
     console.error(e);
@@ -95,17 +124,56 @@ async function onCallback(cb) {
     await upsertUser(tgUserId);
     const u = await getUser(tgUserId);
 
-    // tez status (toast)
+    // toast
     await tg("answerCallbackQuery", { callback_query_id: cb.id, text: "⏳ Yuklanyapti…" });
 
     const data = cb.data || "";
 
-    // LANG
+    // ✅ 1) Til tanlashdan keyin: lokatsiya usulini so'raymiz
     if (data.startsWith("lang:")) {
       const lang = data.split(":")[1];
-      await setUser(tgUserId, { language: lang, step: "REGION" });
 
-      // loading
+      await setUser(tgUserId, {
+        language: lang,
+        step: "LOC_METHOD",
+        temp_parent: null,
+        location_code: null
+      });
+
+      await tg("editMessageText", {
+        chat_id: chatId,
+        message_id: messageId,
+        text:
+          "✅ Til tanlandi.\n\n" +
+          "Endi lokatsiyani tanlang:\n" +
+          "1) 🏙 Manzilni tanlash (viloyat → tuman → shahar)\n" +
+          "2) 📍 Lokatsiya yuborish (GPS)\n\n" +
+          "Qaysi usul qulay?",
+        ...ik([
+          [{ text: "🏙 Manzilni tanlash", callback_data: "locmode:list" }],
+          [{ text: "📍 Lokatsiya yuborish", callback_data: "locmode:gps" }]
+        ])
+      });
+      return;
+    }
+
+    // ✅ 2) Lokatsiya usuli tanlandi
+    if (data === "locmode:gps") {
+      await setUser(tgUserId, { step: "ASK_GPS" });
+
+      await tg("editMessageText", {
+        chat_id: chatId,
+        message_id: messageId,
+        text: "📍 Iltimos, lokatsiyangizni yuboring (namoz vaqtlarini hisoblash uchun)."
+      });
+
+      await askForLocation(chatId);
+      return;
+    }
+
+    if (data === "locmode:list") {
+      await setUser(tgUserId, { step: "REGION", temp_parent: null });
+
       await tg("editMessageText", { chat_id: chatId, message_id: messageId, text: "⏳ Yuklanyapti…" });
 
       const regions = await safeGetRegions();
@@ -113,9 +181,11 @@ async function onCallback(cb) {
         await tg("editMessageText", {
           chat_id: chatId,
           message_id: messageId,
-          text: "⚠️ Lokatsiya bazasi hali yuklanmagan.\nHozircha 📍 lokatsiyangizni yuboring.",
+          text:
+            "⚠️ Manzil ro‘yxati hali yuklanmagan.\n" +
+            "Hozircha 📍 lokatsiyangizni yuboring.",
+          ...ik([[{ text: "📍 Lokatsiya yuborish", callback_data: "locmode:gps" }]])
         });
-        await askForLocation(chatId);
         return;
       }
 
@@ -136,8 +206,12 @@ async function onCallback(cb) {
 
       const regions = await safeGetRegions();
       if (!regions.length) {
-        await tg("editMessageText", { chat_id: chatId, message_id: messageId, text: "⚠️ Lokatsiya bazasi yo‘q. 📍 lokatsiya yuboring." });
-        await askForLocation(chatId);
+        await tg("editMessageText", {
+          chat_id: chatId,
+          message_id: messageId,
+          text: "⚠️ Manzil bazasi yo‘q. 📍 lokatsiya yuboring.",
+          ...ik([[{ text: "📍 Lokatsiya yuborish", callback_data: "locmode:gps" }]])
+        });
         return;
       }
 
@@ -155,8 +229,12 @@ async function onCallback(cb) {
       const districts = await getChildren(code, "district").catch(() => []);
 
       if (!districts.length) {
-        await tg("editMessageText", { chat_id: chatId, message_id: messageId, text: "⚠️ Bu viloyat uchun tumanlar topilmadi. 📍 lokatsiya yuboring." });
-        await askForLocation(chatId);
+        await tg("editMessageText", {
+          chat_id: chatId,
+          message_id: messageId,
+          text: "⚠️ Bu viloyat uchun tumanlar topilmadi. 📍 lokatsiya yuboring.",
+          ...ik([[{ text: "📍 Lokatsiya yuborish", callback_data: "locmode:gps" }]])
+        });
         return;
       }
 
@@ -190,8 +268,12 @@ async function onCallback(cb) {
       const cities = await getChildren(code, "city").catch(() => []);
 
       if (!cities.length) {
-        await tg("editMessageText", { chat_id: chatId, message_id: messageId, text: "⚠️ Shaharlar topilmadi. 📍 lokatsiya yuboring." });
-        await askForLocation(chatId);
+        await tg("editMessageText", {
+          chat_id: chatId,
+          message_id: messageId,
+          text: "⚠️ Shaharlar topilmadi. 📍 lokatsiya yuboring.",
+          ...ik([[{ text: "📍 Lokatsiya yuborish", callback_data: "locmode:gps" }]])
+        });
         return;
       }
 
@@ -223,12 +305,22 @@ async function onCallback(cb) {
 
       const loc = await getLocation(code);
       if (!loc?.lat || !loc?.lng) {
-        await tg("editMessageText", { chat_id: chatId, message_id: messageId, text: "⚠️ Bu lokatsiyada koordinata yo‘q. 📍 lokatsiya yuboring." });
-        await askForLocation(chatId);
+        await tg("editMessageText", {
+          chat_id: chatId,
+          message_id: messageId,
+          text: "⚠️ Bu lokatsiyada koordinata yo‘q. 📍 lokatsiya yuboring.",
+          ...ik([[{ text: "📍 Lokatsiya yuborish", callback_data: "locmode:gps" }]])
+        });
         return;
       }
 
-      await setUser(tgUserId, { location_code: code, lat: loc.lat, lng: loc.lng, step: "PREFS" });
+      await setUser(tgUserId, {
+        location_code: code,
+        lat: loc.lat,
+        lng: loc.lng,
+        step: "PREFS"
+      });
+
       const updated = await getUser(tgUserId);
 
       await tg("editMessageText", {
