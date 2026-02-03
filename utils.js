@@ -13,15 +13,17 @@ const SUPABASE_SERVICE_ROLE_KEY = mustEnv("SUPABASE_SERVICE_ROLE_KEY");
 const TG_WEBHOOK_SECRET = process.env.TG_WEBHOOK_SECRET || "";
 const MINIAPP_URL = process.env.MINIAPP_URL || "";
 
-// Creator/admin access (comma-separated TG user IDs)
-// Example: CREATOR_TG_IDS=123456789,987654321
+/**
+ * Creator/admin user IDs (comma-separated)
+ * Example: CREATOR_TG_IDS=123456789,987654321
+ */
 const CREATOR_TG_IDS = new Set(
   String(process.env.CREATOR_TG_IDS || process.env.CREATOR_TG_ID || "")
     .split(",")
-    .map(s => s.trim())
+    .map((s) => s.trim())
     .filter(Boolean)
-    .map(s => Number(s))
-    .filter(n => Number.isFinite(n))
+    .map((s) => Number(s))
+    .filter((n) => Number.isFinite(n))
 );
 
 function isCreator(tgUserId) {
@@ -41,19 +43,17 @@ async function tg(method, payload) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload)
   });
-
   const json = await res.json();
 
   if (!json.ok) {
     const desc = String(json.description || "");
     const low = desc.toLowerCase();
 
-    // ✅ Telegram “o‘zgarmadi” desa, xato deb hisoblamaymiz
+    // ✅ editMessageText bir xil matn bo'lsa Telegram shunday deydi — buni xato deb hisoblamaymiz
     if (low.includes("message is not modified")) return null;
 
     throw new Error(`Telegram ${method} failed: ${desc}`);
   }
-
   return json.result;
 }
 
@@ -70,7 +70,7 @@ function chunk(arr, size) {
 function locKeyboard(items, prefix, page, pageSize) {
   const pages = chunk(items, pageSize);
   const p = Math.max(0, Math.min(page, pages.length - 1));
-  const rows = (pages[p] || []).map(x => [{ text: x.name_uz, callback_data: `${prefix}:${x.code}:0` }]);
+  const rows = (pages[p] || []).map((x) => [{ text: x.name_uz, callback_data: `${prefix}:${x.code}:0` }]);
 
   const nav = [];
   if (p > 0) nav.push({ text: "⬅️", callback_data: `${prefix}:__PAGE__:${p - 1}` });
@@ -93,34 +93,30 @@ function prefsKeyboard(u) {
   return { reply_markup: { inline_keyboard: rows } };
 }
 
-// ✅ Chat-scoped commands: creator uchun /users ko'rinadi, boshqalar uchun yo'q
-async function setCommandsForChat(chatId, creator = false) {
-  const baseCommands = [
-    { command: "start", description: "Boshlash" },
-    { command: "location", description: "Lokatsiya yuborish" },
-    { command: "reset", description: "Qayta sozlash" }
-  ];
-  const commands = creator
-    ? baseCommands.concat([{ command: "users", description: "Userlar ro'yxati" }])
-    : baseCommands;
-
-  // Per-chat scope: shuning uchun /users boshqalarga “hatto ko'rinmaydi”
-  try {
-    await tg("setMyCommands", {
-      commands,
-      scope: { type: "chat", chat_id: chatId }
-    });
-  } catch {
-    // ignore (Telegram ba'zida rate limit / scope xatolari bo'lishi mumkin)
-  }
-}
-
+/**
+ * ✅ Muammo shu yerda edi:
+ * - users.language NOT NULL bo'lsa, faqat tg_user_id bilan insert qilish (yoki language=null qilish) 23502 beradi.
+ * - Shuning uchun yangi user uchun language default qilib qo'yamiz.
+ */
 async function upsertUser(tgUserId) {
   const { data, error } = await sb.from("users").select("tg_user_id").eq("tg_user_id", tgUserId).maybeSingle();
   if (error) throw error;
+
   if (!data) {
-    const { error: insErr } = await sb.from("users").insert({ tg_user_id: tgUserId });
-    if (insErr) throw insErr;
+    // Minimal insert: tg_user_id + language (NOT NULL bo'lsa ham o'tadi)
+    const payload = { tg_user_id: tgUserId, language: "uz" };
+    const { error: insErr } = await sb.from("users").insert(payload);
+
+    // Agar sizning users jadvalingizda "language" ustuni bo'lmasa (boshqa versiya), fallback qilamiz
+    if (insErr) {
+      const msg = String(insErr.message || insErr || "");
+      if (msg.toLowerCase().includes("language") && (insErr.code === "42703" || msg.includes("column"))) {
+        const { error: insErr2 } = await sb.from("users").insert({ tg_user_id: tgUserId });
+        if (insErr2) throw insErr2;
+      } else {
+        throw insErr;
+      }
+    }
   }
 }
 
@@ -168,6 +164,9 @@ function userFriendlyError(e) {
   if (msg.includes("Telegram") && msg.includes("Unauthorized")) {
     return "⚠️ Bot token xato yoki env yo‘q. Vercel Environment Variables tekshiring.";
   }
+  if (msg.includes("null value") && msg.includes("language")) {
+    return "⚠️ Baza (users.language) NOT NULL, lekin kod language=null yuboryapti. Kodni yangilang.";
+  }
   return "⚠️ Texnik xatolik. Iltimos keyinroq urinib ko‘ring.";
 }
 
@@ -199,25 +198,21 @@ function parseMiniappUser(initData) {
   return { tg_user_id: user.id };
 }
 
-/** ====== TIMEZONE FIX (ASOSIY TUZATISH) ====== */
+/** ====== TIMEZONE FIX ====== */
 const DEFAULT_TZ = "Asia/Tashkent";
 
 function normalizeTz(input) {
   let tz = String(input || "").trim();
 
-  // ":UTC" / "::UTC" -> "UTC"
   tz = tz.replace(/^:+/, "");
   tz = tz.replace(/\s+/g, "");
 
   if (!tz) return DEFAULT_TZ;
 
-  // ko‘p uchraydigan nomlar
   if (tz === "UTC" || tz === "GMT") tz = "Etc/UTC";
 
-  // "UTC+5" kabi yozuvlar Intl’ga to‘g‘ri kelmaydi -> fallback
   if (/^UTC[+-]\d{1,2}$/.test(tz)) return DEFAULT_TZ;
 
-  // tekshiruv: Intl qabul qiladimi?
   try {
     new Intl.DateTimeFormat("en-GB", { timeZone: tz }).format(new Date());
     return tz;
@@ -228,32 +223,38 @@ function normalizeTz(input) {
 
 const APP_TZ = normalizeTz(process.env.APP_TZ || DEFAULT_TZ);
 
-function tzDate(tz, addDays = 0) {
-  const now = new Date();
+function fmtTime(date, tz = APP_TZ) {
+  const z = normalizeTz(tz);
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: z,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).format(date);
+}
+
+function tzDate(tz = APP_TZ, addDays = 0) {
+  const z = normalizeTz(tz);
+  const now = new Date(Date.now() + addDays * 86400000);
+
   const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: tz,
+    timeZone: z,
     year: "numeric",
     month: "2-digit",
     day: "2-digit"
   }).formatToParts(now);
-  const y = parts.find(p => p.type === "year").value;
-  const m = parts.find(p => p.type === "month").value;
-  const d = parts.find(p => p.type === "day").value;
-  const base = new Date(`${y}-${m}-${d}T00:00:00.000Z`);
-  return new Date(base.getTime() + addDays * 86400000);
+
+  const get = (t) => parts.find((p) => p.type === t)?.value;
+  const y = Number(get("year"));
+  const m = Number(get("month"));
+  const d = Number(get("day"));
+
+  return new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
 }
 
-function fmtTime(dateObj, tz) {
-  return new Intl.DateTimeFormat("uz-UZ", { timeZone: tz, hour: "2-digit", minute: "2-digit" }).format(dateObj);
+function tzYMD(tz = APP_TZ, addDays = 0) {
+  return tzDate(tz, addDays).toISOString().slice(0, 10);
 }
-
-function tzYMD(tz, addDays = 0) {
-  const d = tzDate(tz, addDays);
-  return d.toISOString().slice(0, 10);
-}
-
-// ===== RAMADAN CHECK (safe & non-breaking) =====
-let _ramadanCache = { key: "", value: false };
 
 function islamicMonth(tz = APP_TZ, dateObj = new Date()) {
   const z = normalizeTz(tz);
@@ -262,7 +263,7 @@ function islamicMonth(tz = APP_TZ, dateObj = new Date()) {
       timeZone: z,
       month: "numeric"
     }).formatToParts(dateObj);
-    const m = parts.find(p => p.type === "month")?.value;
+    const m = parts.find((p) => p.type === "month")?.value;
     const n = Number(m);
     return Number.isFinite(n) ? n : null;
   } catch {
@@ -271,29 +272,16 @@ function islamicMonth(tz = APP_TZ, dateObj = new Date()) {
 }
 
 /**
- * Ramadan today?
- * - Uses RAMADAN_START / RAMADAN_END env vars if present (YYYY-MM-DD)
- * - Else tries Supabase table `ramadan_periods` (starts_on, ends_on)
- * - Else fallback to islamic calendar (month 9)
- *
- * IMPORTANT: never throws (so miniapp/cron won't crash).
+ * ✅ isRamadanToday endi hech qachon crash bermaydi (fallbacklar bilan)
  */
 async function isRamadanToday(tz = APP_TZ) {
   const z = normalizeTz(tz);
   const ymd = tzYMD(z, 0);
-  const cacheKey = `${z}:${ymd}`;
-  if (_ramadanCache.key === cacheKey) return _ramadanCache.value;
 
-  // 1) ENV override
   const start = String(process.env.RAMADAN_START || "").slice(0, 10);
   const end = String(process.env.RAMADAN_END || "").slice(0, 10);
-  if (start && end) {
-    const value = ymd >= start && ymd <= end;
-    _ramadanCache = { key: cacheKey, value };
-    return value;
-  }
+  if (start && end) return ymd >= start && ymd <= end;
 
-  // 2) DB table check (optional)
   try {
     const { data, error } = await sb
       .from("ramadan_periods")
@@ -302,21 +290,34 @@ async function isRamadanToday(tz = APP_TZ) {
       .gte("ends_on", ymd)
       .limit(1);
 
-    if (!error) {
-      const value = (data || []).length > 0;
-      _ramadanCache = { key: cacheKey, value };
-      return value;
-    }
-    // If table/columns don't exist — ignore and fallback
+    if (!error) return (data || []).length > 0;
   } catch {
-    // ignore and fallback
+    // ignore
   }
 
-  // 3) Fallback: islamic calendar month 9
   const m = islamicMonth(z, tzDate(z, 0));
-  const value = m === 9;
-  _ramadanCache = { key: cacheKey, value };
-  return value;
+  return m === 9;
+}
+
+/**
+ * Creator uchun /users komandasi faqat o'sha chatda ko'rinishi uchun.
+ */
+async function setCommandsForChat(chatId, creator = false) {
+  const base = [
+    { command: "start", description: "Boshlash" },
+    { command: "location", description: "Lokatsiya yuborish" },
+    { command: "reset", description: "Qayta sozlash" }
+  ];
+  const commands = creator ? base.concat([{ command: "users", description: "Userlar ro'yxati" }]) : base;
+
+  try {
+    await tg("setMyCommands", {
+      commands,
+      scope: { type: "chat", chat_id: chatId }
+    });
+  } catch {
+    // ignore
+  }
 }
 
 module.exports = {
@@ -328,8 +329,11 @@ module.exports = {
   getChildren, getLocation,
   locKeyboard, prefsKeyboard,
   userFriendlyError,
-  validateInitData, parseMiniappUser,
-  DEFAULT_TZ, APP_TZ, normalizeTz,
-  tzDate, fmtTime, tzYMD,
-  isRamadanToday
+  parseMiniappUser,
+  isRamadanToday,
+  APP_TZ,
+  normalizeTz,
+  fmtTime,
+  tzDate,
+  tzYMD
 };

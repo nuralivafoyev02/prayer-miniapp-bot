@@ -1,8 +1,7 @@
 const {
   sb, tg, ik,
   TG_WEBHOOK_SECRET,
-  isCreator,
-  setCommandsForChat,
+  isCreator, setCommandsForChat,
   upsertUser, getUser, setUser,
   getChildren, getLocation,
   locKeyboard, prefsKeyboard,
@@ -29,12 +28,21 @@ module.exports = async (req, res) => {
   }
 };
 
+const USERS_PAGE_SIZE = 10;
+
 async function onMessage(msg) {
   const chatId = msg.chat.id;
   const tgUserId = msg.from.id;
 
   try {
     await upsertUser(tgUserId);
+
+    // 🔒 /start bosilganda shu chat uchun komandalar yangilanadi:
+    // - creator bo'lsa /users ko'rinadi
+    // - oddiy user uchun /users umuman ko'rinmaydi
+    if ((msg.text || "").trim().startsWith("/start")) {
+      await setCommandsForChat(chatId, isCreator(tgUserId));
+    }
 
     // GPS yuborildi
     if (msg.location) {
@@ -47,7 +55,6 @@ async function onMessage(msg) {
         step: "PREFS"
       });
 
-      // reply keyboardni olib tashlaymiz (chiroyli UX)
       await tg("sendMessage", {
         chat_id: chatId,
         text: "✅ Lokatsiya saqlandi.",
@@ -66,26 +73,22 @@ async function onMessage(msg) {
 
     const text = (msg.text || "").trim();
 
-    // 🔒 Creator-only: userlar ro'yxati
-    // Boshqa userlar uchun javob ham bermaymiz (ko'rinmas bo'lsin)
-    if (text.startsWith("/users")) {
-      if (!isCreator(tgUserId)) return;
-      const parts = text.split(/\s+/);
-      const page = Math.max(0, Number(parts[1] || 0) || 0);
-      await sendUsersPage(chatId, page, { mode: "send" });
+    if (text === "/users") {
+      if (!isCreator(tgUserId)) {
+        await tg("sendMessage", { chat_id: chatId, text: "⚠️ Bu buyruq mavjud emas." });
+        return;
+      }
+      await sendUsersPage({ chatId, page: 0, mode: "send" });
       return;
     }
 
     if (text === "/reset") {
+      // ❌ oldin language:null yuborilgan — users.language NOT NULL bo'lsa 23502 xato berardi
       await setUser(tgUserId, {
         step: "LANG",
-        language: null,
         temp_parent: null,
         location_code: null
       });
-
-      // creator bo'lsa /users komandasi shu chatda ko'rinsin
-      await setCommandsForChat(chatId, isCreator(tgUserId));
       await sendLang(chatId);
       return;
     }
@@ -96,15 +99,12 @@ async function onMessage(msg) {
     }
 
     if (text.startsWith("/start")) {
+      // ❌ oldin language:null yuborilgan — users.language NOT NULL bo'lsa 23502 xato berardi
       await setUser(tgUserId, {
         step: "LANG",
-        language: null,
         temp_parent: null,
         location_code: null
       });
-
-      // creator bo'lsa /users komandasi faqat shu chatda chiqadi
-      await setCommandsForChat(chatId, isCreator(tgUserId));
 
       await tg("sendMessage", {
         chat_id: chatId,
@@ -142,16 +142,21 @@ async function onCallback(cb) {
     await upsertUser(tgUserId);
     const u = await getUser(tgUserId);
 
-    // toast
     await tg("answerCallbackQuery", { callback_query_id: cb.id, text: "⏳ Yuklanyapti…" });
 
     const data = cb.data || "";
 
-    // 🔒 Creator-only pagination: userlar ro'yxati
-    if (data.startsWith("adminusers:")) {
-      if (!isCreator(tgUserId)) return;
-      const page = Math.max(0, Number(data.split(":")[1] || 0) || 0);
-      await sendUsersPage(chatId, page, { mode: "edit", messageId });
+    // ======= ADMIN USERS PAGINATION (creator only) =======
+    if (data.startsWith("au:")) {
+      if (!isCreator(tgUserId)) {
+        await tg("answerCallbackQuery", { callback_query_id: cb.id, text: "Ruxsat yo'q" });
+        return;
+      }
+      const [, action, pageStr] = data.split(":");
+      const page = Math.max(0, parseInt(pageStr || "0", 10) || 0);
+      if (action === "p" || action === "r") {
+        await sendUsersPage({ chatId, page, mode: "edit", messageId });
+      }
       return;
     }
 
@@ -166,19 +171,19 @@ async function onCallback(cb) {
         location_code: null
       });
 
-      await tg("editMessageText", {
-        chat_id: chatId,
-        message_id: messageId,
+      await safeEditText({
+        chatId,
+        messageId,
         text:
           "✅ Til tanlandi.\n\n" +
           "Endi lokatsiyani tanlang:\n" +
           "1) 🏙 Manzilni tanlash (viloyat → tuman → shahar)\n" +
           "2) 📍 Lokatsiya yuborish (GPS)\n\n" +
           "Qaysi usul qulay?",
-        ...ik([
+        replyMarkup: ik([
           [{ text: "🏙 Manzilni tanlash", callback_data: "locmode:list" }],
           [{ text: "📍 Lokatsiya yuborish", callback_data: "locmode:gps" }]
-        ])
+        ]).reply_markup
       });
       return;
     }
@@ -187,9 +192,9 @@ async function onCallback(cb) {
     if (data === "locmode:gps") {
       await setUser(tgUserId, { step: "ASK_GPS" });
 
-      await tg("editMessageText", {
-        chat_id: chatId,
-        message_id: messageId,
+      await safeEditText({
+        chatId,
+        messageId,
         text: "📍 Iltimos, lokatsiyangizni yuboring (namoz vaqtlarini hisoblash uchun)."
       });
 
@@ -200,26 +205,26 @@ async function onCallback(cb) {
     if (data === "locmode:list") {
       await setUser(tgUserId, { step: "REGION", temp_parent: null });
 
-      await tg("editMessageText", { chat_id: chatId, message_id: messageId, text: "⏳ Yuklanyapti…" });
+      await safeEditText({ chatId, messageId, text: "⏳ Yuklanyapti…" });
 
       const regions = await safeGetRegions();
       if (!regions.length) {
-        await tg("editMessageText", {
-          chat_id: chatId,
-          message_id: messageId,
+        await safeEditText({
+          chatId,
+          messageId,
           text:
             "⚠️ Manzil ro‘yxati hali yuklanmagan.\n" +
             "Hozircha 📍 lokatsiyangizni yuboring.",
-          ...ik([[{ text: "📍 Lokatsiya yuborish", callback_data: "locmode:gps" }]])
+          replyMarkup: ik([[{ text: "📍 Lokatsiya yuborish", callback_data: "locmode:gps" }]]).reply_markup
         });
         return;
       }
 
-      await tg("editMessageText", {
-        chat_id: chatId,
-        message_id: messageId,
+      await safeEditText({
+        chatId,
+        messageId,
         text: "Viloyatni tanlang:",
-        ...locKeyboard(regions, "region", 0, 10)
+        replyMarkup: locKeyboard(regions, "region", 0, 10).reply_markup
       });
       return;
     }
@@ -228,25 +233,25 @@ async function onCallback(cb) {
     if (data.startsWith("region:")) {
       const [, code, pageStr] = data.split(":");
 
-      await tg("editMessageText", { chat_id: chatId, message_id: messageId, text: "⏳ Yuklanyapti…" });
+      await safeEditText({ chatId, messageId, text: "⏳ Yuklanyapti…" });
 
       const regions = await safeGetRegions();
       if (!regions.length) {
-        await tg("editMessageText", {
-          chat_id: chatId,
-          message_id: messageId,
+        await safeEditText({
+          chatId,
+          messageId,
           text: "⚠️ Manzil bazasi yo‘q. 📍 lokatsiya yuboring.",
-          ...ik([[{ text: "📍 Lokatsiya yuborish", callback_data: "locmode:gps" }]])
+          replyMarkup: ik([[{ text: "📍 Lokatsiya yuborish", callback_data: "locmode:gps" }]]).reply_markup
         });
         return;
       }
 
       if (code === "__PAGE__") {
-        await tg("editMessageText", {
-          chat_id: chatId,
-          message_id: messageId,
+        await safeEditText({
+          chatId,
+          messageId,
           text: "Viloyatni tanlang:",
-          ...locKeyboard(regions, "region", parseInt(pageStr, 10), 10)
+          replyMarkup: locKeyboard(regions, "region", parseInt(pageStr, 10), 10).reply_markup
         });
         return;
       }
@@ -255,20 +260,20 @@ async function onCallback(cb) {
       const districts = await getChildren(code, "district").catch(() => []);
 
       if (!districts.length) {
-        await tg("editMessageText", {
-          chat_id: chatId,
-          message_id: messageId,
+        await safeEditText({
+          chatId,
+          messageId,
           text: "⚠️ Bu viloyat uchun tumanlar topilmadi. 📍 lokatsiya yuboring.",
-          ...ik([[{ text: "📍 Lokatsiya yuborish", callback_data: "locmode:gps" }]])
+          replyMarkup: ik([[{ text: "📍 Lokatsiya yuborish", callback_data: "locmode:gps" }]]).reply_markup
         });
         return;
       }
 
-      await tg("editMessageText", {
-        chat_id: chatId,
-        message_id: messageId,
+      await safeEditText({
+        chatId,
+        messageId,
         text: "Tumanni tanlang:",
-        ...locKeyboard(districts, "district", 0, 10)
+        replyMarkup: locKeyboard(districts, "district", 0, 10).reply_markup
       });
       return;
     }
@@ -277,15 +282,15 @@ async function onCallback(cb) {
     if (data.startsWith("district:")) {
       const [, code, pageStr] = data.split(":");
 
-      await tg("editMessageText", { chat_id: chatId, message_id: messageId, text: "⏳ Yuklanyapti…" });
+      await safeEditText({ chatId, messageId, text: "⏳ Yuklanyapti…" });
 
       if (code === "__PAGE__") {
         const districts = await getChildren(u.temp_parent, "district").catch(() => []);
-        await tg("editMessageText", {
-          chat_id: chatId,
-          message_id: messageId,
+        await safeEditText({
+          chatId,
+          messageId,
           text: "Tumanni tanlang:",
-          ...locKeyboard(districts, "district", parseInt(pageStr, 10), 10)
+          replyMarkup: locKeyboard(districts, "district", parseInt(pageStr, 10), 10).reply_markup
         });
         return;
       }
@@ -294,20 +299,20 @@ async function onCallback(cb) {
       const cities = await getChildren(code, "city").catch(() => []);
 
       if (!cities.length) {
-        await tg("editMessageText", {
-          chat_id: chatId,
-          message_id: messageId,
+        await safeEditText({
+          chatId,
+          messageId,
           text: "⚠️ Shaharlar topilmadi. 📍 lokatsiya yuboring.",
-          ...ik([[{ text: "📍 Lokatsiya yuborish", callback_data: "locmode:gps" }]])
+          replyMarkup: ik([[{ text: "📍 Lokatsiya yuborish", callback_data: "locmode:gps" }]]).reply_markup
         });
         return;
       }
 
-      await tg("editMessageText", {
-        chat_id: chatId,
-        message_id: messageId,
+      await safeEditText({
+        chatId,
+        messageId,
         text: "Shaharni tanlang:",
-        ...locKeyboard(cities, "city", 0, 10)
+        replyMarkup: locKeyboard(cities, "city", 0, 10).reply_markup
       });
       return;
     }
@@ -316,26 +321,26 @@ async function onCallback(cb) {
     if (data.startsWith("city:")) {
       const [, code, pageStr] = data.split(":");
 
-      await tg("editMessageText", { chat_id: chatId, message_id: messageId, text: "⏳ Yuklanyapti…" });
+      await safeEditText({ chatId, messageId, text: "⏳ Yuklanyapti…" });
 
       if (code === "__PAGE__") {
         const cities = await getChildren(u.temp_parent, "city").catch(() => []);
-        await tg("editMessageText", {
-          chat_id: chatId,
-          message_id: messageId,
+        await safeEditText({
+          chatId,
+          messageId,
           text: "Shaharni tanlang:",
-          ...locKeyboard(cities, "city", parseInt(pageStr, 10), 10)
+          replyMarkup: locKeyboard(cities, "city", parseInt(pageStr, 10), 10).reply_markup
         });
         return;
       }
 
       const loc = await getLocation(code);
       if (!loc?.lat || !loc?.lng) {
-        await tg("editMessageText", {
-          chat_id: chatId,
-          message_id: messageId,
+        await safeEditText({
+          chatId,
+          messageId,
           text: "⚠️ Bu lokatsiyada koordinata yo‘q. 📍 lokatsiya yuboring.",
-          ...ik([[{ text: "📍 Lokatsiya yuborish", callback_data: "locmode:gps" }]])
+          replyMarkup: ik([[{ text: "📍 Lokatsiya yuborish", callback_data: "locmode:gps" }]]).reply_markup
         });
         return;
       }
@@ -349,11 +354,11 @@ async function onCallback(cb) {
 
       const updated = await getUser(tgUserId);
 
-      await tg("editMessageText", {
-        chat_id: chatId,
-        message_id: messageId,
+      await safeEditText({
+        chatId,
+        messageId,
         text: "✅ Lokatsiya tanlandi. Endi eslatmalarni sozlang:",
-        ...prefsKeyboard(updated)
+        replyMarkup: prefsKeyboard(updated).reply_markup
       });
       return;
     }
@@ -367,11 +372,11 @@ async function onCallback(cb) {
       await setUser(tgUserId, patch);
       const updated = await getUser(tgUserId);
 
-      await tg("editMessageText", {
-        chat_id: chatId,
-        message_id: messageId,
+      await safeEditText({
+        chatId,
+        messageId,
         text: "✅ Saqlandi. Eslatmalar:",
-        ...prefsKeyboard(updated)
+        replyMarkup: prefsKeyboard(updated).reply_markup
       });
       return;
     }
@@ -405,103 +410,67 @@ async function safeGetRegions() {
   return await getChildren(null, "region").catch(() => []);
 }
 
-/** =====================
- *  Creator-only /users
- * ===================== */
-const USERS_PAGE_SIZE = 20;
-
-async function sendUsersPage(chatId, page, opts = { mode: "send" }) {
-  const { rows, total } = await fetchUsersPage(page);
-  const text = renderUsersText(rows, page, total);
-
-  const hasPrev = page > 0;
-  const totalPages = typeof total === "number" ? Math.max(1, Math.ceil(total / USERS_PAGE_SIZE)) : null;
-  const hasNext = totalPages ? page < totalPages - 1 : rows.length === USERS_PAGE_SIZE;
-
-  const navRow = [];
-  if (hasPrev) navRow.push({ text: "⬅️", callback_data: `adminusers:${page - 1}` });
-  navRow.push({ text: "🔄", callback_data: `adminusers:${page}` });
-  if (hasNext) navRow.push({ text: "➡️", callback_data: `adminusers:${page + 1}` });
-
-  const reply_markup = { inline_keyboard: [navRow] };
-
-  if (opts.mode === "edit" && opts.messageId) {
-    try {
-      await tg("editMessageText", {
-        chat_id: chatId,
-        message_id: opts.messageId,
-        text,
-        reply_markup
-      });
-    } catch (e) {
-      const msg = String(e?.message || e || "").toLowerCase();
-      if (msg.includes("can't be edited") || msg.includes("message to edit not found")) {
-        await tg("sendMessage", { chat_id: chatId, text, reply_markup });
-        return;
-      }
-      throw e;
-    }
-    return;
+async function safeEditText({ chatId, messageId, text, replyMarkup }) {
+  try {
+    const payload = { chat_id: chatId, message_id: messageId, text };
+    if (replyMarkup) payload.reply_markup = replyMarkup;
+    await tg("editMessageText", payload);
+  } catch (e) {
+    await tg("sendMessage", {
+      chat_id: chatId,
+      text,
+      ...(replyMarkup ? { reply_markup: replyMarkup } : {})
+    }).catch(() => {});
   }
-
-
-  await tg("sendMessage", {
-    chat_id: chatId,
-    text,
-    reply_markup
-  });
 }
 
-async function fetchUsersPage(page) {
+async function sendUsersPage({ chatId, page, mode, messageId }) {
   const from = page * USERS_PAGE_SIZE;
   const to = from + USERS_PAGE_SIZE - 1;
 
-  const { data, error, count } = await sb
+  const { data, count, error } = await sb
     .from("users")
     .select(
-      "tg_user_id,language,location_code,lat,lng,notify_prayers,notify_ramadan,notify_daily_morning,notify_daily_evening,created_at,updated_at",
+      "tg_user_id,language,location_code,lat,lng,notify_prayers,notify_ramadan,notify_daily_morning,notify_daily_evening",
       { count: "exact" }
     )
-    .order("updated_at", { ascending: false })
+    .order("tg_user_id", { ascending: true })
     .range(from, to);
 
   if (error) throw error;
-  return { rows: data || [], total: typeof count === "number" ? count : null };
-}
 
-function renderUsersText(rows, page, total) {
-  const head = [
-    "👤 Userlar ro'yxati",
-    total != null
-      ? `Sahifa: ${page + 1}/${Math.max(1, Math.ceil(total / USERS_PAGE_SIZE))} | Jami: ${total}`
-      : `Sahifa: ${page + 1}`,
-    ""
-  ].join("\n");
+  const total = count || 0;
+  const totalPages = Math.max(1, Math.ceil(total / USERS_PAGE_SIZE));
+  const p = Math.max(0, Math.min(page, totalPages - 1));
 
-  if (!rows.length) return head + "Hali user yo'q.";
-
+  const rows = data || [];
   const lines = rows.map((u, i) => {
-    const idx = page * USERS_PAGE_SIZE + i + 1;
-    const prefs = prefIcons(u);
-    const loc = locLabel(u);
-    const lang = u.language ? `🌐${u.language}` : "";
-    return `${idx}) ${u.tg_user_id}  ${lang} ${loc}  ${prefs}`.trim();
+    const idx = from + i + 1;
+    const lang = u.language || "uz";
+    const loc = u.location_code ? "🏙 MANZIL" : (u.lat && u.lng ? "📍 GPS" : "—");
+    const icons =
+      (u.notify_prayers ? "🕌" : "") +
+      (u.notify_ramadan ? "🌙" : "") +
+      (u.notify_daily_morning ? "☀️" : "") +
+      (u.notify_daily_evening ? "🌆" : "");
+    return `${idx}) ${u.tg_user_id} 🌐 ${lang} ${loc} ${icons || "—"}`.trim();
   });
 
-  return head + lines.join("\n");
-}
+  const text =
+    "👤 Userlar ro'yxati\n" +
+    `Sahifa: ${p + 1}/${totalPages} | Jami: ${total}\n\n` +
+    (lines.length ? lines.join("\n") : "— Hozircha user yo'q —");
 
-function prefIcons(u) {
-  let s = "";
-  if (u.notify_prayers) s += "🕌";
-  if (u.notify_ramadan) s += "🌙";
-  if (u.notify_daily_morning) s += "☀️";
-  if (u.notify_daily_evening) s += "🌆";
-  return s || "—";
-}
+  const nav = [];
+  if (p > 0) nav.push({ text: "⬅️", callback_data: `au:p:${p - 1}` });
+  nav.push({ text: "🔄", callback_data: `au:r:${p}` });
+  if (p < totalPages - 1) nav.push({ text: "➡️", callback_data: `au:p:${p + 1}` });
 
-function locLabel(u) {
-  if (u.lat != null && u.lng != null) return "📍GPS";
-  if (u.location_code) return `🏙${u.location_code}`;
-  return "";
+  const reply_markup = { inline_keyboard: [nav] };
+
+  if (mode === "edit" && messageId) {
+    await safeEditText({ chatId, messageId, text, replyMarkup: reply_markup });
+  } else {
+    await tg("sendMessage", { chat_id: chatId, text, reply_markup });
+  }
 }
