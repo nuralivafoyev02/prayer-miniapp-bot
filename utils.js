@@ -156,6 +156,37 @@ async function isRamadanToday() {
   if (error) throw error;
   return (data || []).length > 0;
 }
+const APP_TZ = process.env.APP_TZ || process.env.TZ || "Asia/Tashkent";
+
+function fmtTime(date, tz = APP_TZ) {
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: tz,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).format(date);
+}
+
+// Toshkent bo'yicha "bugun" sanasini aniq olish (server UTC bo'lsa ham)
+function tzDate(tz = APP_TZ, addDays = 0) {
+  const now = new Date(Date.now() + addDays * 86400000);
+
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(now);
+
+  const get = (t) => parts.find(p => p.type === t)?.value;
+  const y = Number(get("year"));
+  const m = Number(get("month"));
+  const d = Number(get("day"));
+
+  // UTC muhitida ham y/m/d to'g'ri bo'lishi uchun UTC noon
+  return new Date(Date.UTC(y, m - 1, d, 12, 0, 0));
+}
+
 
 module.exports = {
   sb, tg, ik,
@@ -165,5 +196,8 @@ module.exports = {
   locKeyboard, prefsKeyboard,
   userFriendlyError,
   parseMiniappUser,
-  isRamadanToday
+  isRamadanToday,
+  APP_TZ,
+  fmtTime,
+  tzDate,
 };

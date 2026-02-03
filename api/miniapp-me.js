@@ -1,22 +1,19 @@
 const adhan = require("adhan");
-const { sb, parseMiniappUser, isRamadanToday } = require("../utils");
+const { sb, parseMiniappUser, isRamadanToday, APP_TZ, fmtTime, tzDate } = require("../utils");
 
-function hhmm(d) {
-  return new Date(d).toTimeString().slice(0, 5);
-}
-
-function prayerTimes(lat, lng, date) {
+function prayerTimes(lat, lng, date, tz) {
   const coords = new adhan.Coordinates(lat, lng);
   const params = adhan.CalculationMethod.MuslimWorldLeague();
   params.madhab = adhan.Madhab.Shafi;
+
   const pt = new adhan.PrayerTimes(coords, date, params);
 
   return {
-    Bomdod: hhmm(pt.fajr),
-    Peshin: hhmm(pt.dhuhr),
-    Asr: hhmm(pt.asr),
-    Shom: hhmm(pt.maghrib),
-    Xufton: hhmm(pt.isha)
+    Bomdod: fmtTime(pt.fajr, tz),
+    Peshin: fmtTime(pt.dhuhr, tz),
+    Asr: fmtTime(pt.asr, tz),
+    Shom: fmtTime(pt.maghrib, tz),
+    Xufton: fmtTime(pt.isha, tz)
   };
 }
 
@@ -35,16 +32,19 @@ module.exports = async (req, res) => {
       return res.status(200).json({ ok: true, needsSetup: true });
     }
 
-    const today = new Date();
-    const tomorrow = new Date(today.getTime() + 86400000);
+
+    const tz = APP_TZ;
+    const today = tzDate(tz, 0);
+    const tomorrow = tzDate(tz, 1);
 
     const ramadan = await isRamadanToday();
 
     return res.status(200).json({
       ok: true,
+      tz,
       ramadan,
-      today: prayerTimes(u.lat, u.lng, today),
-      tomorrow: prayerTimes(u.lat, u.lng, tomorrow),
+      today: prayerTimes(u.lat, u.lng, today, tz),
+      tomorrow: prayerTimes(u.lat, u.lng, tomorrow, tz),
       prefs: {
         notify_prayers: u.notify_prayers,
         notify_ramadan: u.notify_ramadan,

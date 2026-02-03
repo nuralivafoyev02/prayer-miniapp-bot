@@ -1,5 +1,5 @@
 const adhan = require("adhan");
-const { sb, tg, isRamadanToday } = require("../utils");
+const { sb, tg, isRamadanToday, APP_TZ, fmtTime, tzDate } = require("../utils");
 
 function hhmm(d) { return new Date(d).toTimeString().slice(0, 5); }
 
@@ -12,16 +12,16 @@ function prayerTimes(lat, lng, date) {
     fajr: pt.fajr, dhuhr: pt.dhuhr, asr: pt.asr, maghrib: pt.maghrib, isha: pt.isha
   };
 }
-
-function mapTimes(t) {
+function mapTimes(t, tz) {
   return {
-    Bomdod: hhmm(t.fajr),
-    Peshin: hhmm(t.dhuhr),
-    Asr: hhmm(t.asr),
-    Shom: hhmm(t.maghrib),
-    Xufton: hhmm(t.isha)
+    Bomdod: fmtTime(t.fajr, tz),
+    Peshin: fmtTime(t.dhuhr, tz),
+    Asr: fmtTime(t.asr, tz),
+    Shom: fmtTime(t.maghrib, tz),
+    Xufton: fmtTime(t.isha, tz)
   };
 }
+
 
 module.exports = async (req, res) => {
   try {
@@ -34,12 +34,11 @@ module.exports = async (req, res) => {
       .not("lng", "is", null);
 
     if (error) throw error;
-
     const ramadan = await isRamadanToday();
 
-    const now = new Date();
-    const today = now;
-    const tomorrow = new Date(now.getTime() + 86400000);
+    const tz = APP_TZ;          // ✅ SHU YERDA
+    const today = tzDate(tz, 0);
+    const tomorrow = tzDate(tz, 1);
 
     for (const u of users || []) {
       const t1 = prayerTimes(u.lat, u.lng, today);
@@ -50,14 +49,14 @@ module.exports = async (req, res) => {
         await tg("sendMessage", {
           chat_id: u.tg_user_id,
           text: `☀️ Bugungi namoz vaqtlari:\n${lines(mapTimes(t1))}${ramadan && u.notify_ramadan ? "\n\n🌙 Ramazon eslatmalari ON" : ""}`
-        }).catch(() => {});
+        }).catch(() => { });
       }
 
       if (u.notify_daily_evening) {
         await tg("sendMessage", {
           chat_id: u.tg_user_id,
           text: `🌆 Ertangi namoz vaqtlari:\n${lines(mapTimes(t2))}${ramadan && u.notify_ramadan ? "\n\n🌙 Ramazon eslatmalari ON" : ""}`
-        }).catch(() => {});
+        }).catch(() => { });
       }
 
       // Real-time uchun queue tayyorlab qo'yamiz (cron-tick bilan jo'natish mumkin)
@@ -78,7 +77,7 @@ module.exports = async (req, res) => {
       }
 
       if (inserts.length) {
-        await sb.from("notifications").insert(inserts).catch(() => {});
+        await sb.from("notifications").insert(inserts).catch(() => { });
       }
     }
 
