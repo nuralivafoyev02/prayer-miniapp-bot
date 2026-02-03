@@ -8,9 +8,10 @@ function mustEnv(name) {
 }
 
 const BOT_TOKEN = mustEnv("BOT_TOKEN");
-const TG_WEBHOOK_SECRET = mustEnv("TG_WEBHOOK_SECRET");
 const SUPABASE_URL = mustEnv("SUPABASE_URL");
 const SUPABASE_SERVICE_ROLE_KEY = mustEnv("SUPABASE_SERVICE_ROLE_KEY");
+const TG_WEBHOOK_SECRET = process.env.TG_WEBHOOK_SECRET || "";
+const MINIAPP_URL = process.env.MINIAPP_URL || "";
 
 const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { persistSession: false }
@@ -32,27 +33,45 @@ function ik(rows) {
   return { reply_markup: { inline_keyboard: rows } };
 }
 
-function t(lang, key) {
-  const dict = {
-    uz: {
-      startIntro:
-        "Assalomu alaykum! Men namoz va Ramazon vaqtlarini eslatib turaman.\n\n✅ Til tanlash\n✅ Viloyat → tuman → shahar\n✅ Namoz vaqtida eslatma\n✅ Ramazonda saharlik/iftor + duo\n✅ Har kuni bugungi va ertangi jadval",
-      chooseLang: "Tilni tanlang:",
-      chooseRegion: "Viloyatni tanlang:",
-      chooseDistrict: "Tumanni tanlang:",
-      chooseCity: "Shaharni tanlang:",
-      prefsTitle: "Eslatmalarni sozlang:",
-      prefsSaved: "✅ Saqlandi",
-      openMiniapp: "📲 Mini App ochish",
-      done: "✅ Tayyor! Endi mini app orqali ham ko‘rasiz."
-    }
-  };
-  return (dict[lang] && dict[lang][key]) || dict.uz[key] || key;
+function chunk(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+function locKeyboard(items, prefix, page, pageSize) {
+  const pages = chunk(items, pageSize);
+  const p = Math.max(0, Math.min(page, pages.length - 1));
+  const rows = (pages[p] || []).map(x => [{ text: x.name_uz, callback_data: `${prefix}:${x.code}:0` }]);
+
+  const nav = [];
+  if (p > 0) nav.push({ text: "⬅️", callback_data: `${prefix}:__PAGE__:${p - 1}` });
+  if (p < pages.length - 1) nav.push({ text: "➡️", callback_data: `${prefix}:__PAGE__:${p + 1}` });
+  if (nav.length) rows.push(nav);
+
+  return ik(rows);
+}
+
+function prefsKeyboard(u) {
+  const rows = [
+    [{ text: `🕌 Namoz: ${u.notify_prayers ? "ON" : "OFF"}`, callback_data: "pref:notify_prayers" }],
+    [{ text: `🌙 Ramazon: ${u.notify_ramadan ? "ON" : "OFF"}`, callback_data: "pref:notify_ramadan" }],
+    [{ text: `☀️ Ertalab jadval: ${u.notify_daily_morning ? "ON" : "OFF"}`, callback_data: "pref:notify_daily_morning" }],
+    [{ text: `🌆 Kechki jadval: ${u.notify_daily_evening ? "ON" : "OFF"}`, callback_data: "pref:notify_daily_evening" }]
+  ];
+
+  if (MINIAPP_URL) rows.push([{ text: "📲 Mini App", web_app: { url: MINIAPP_URL } }]);
+
+  return { reply_markup: { inline_keyboard: rows } };
 }
 
 async function upsertUser(tgUserId) {
-  const { data } = await sb.from("users").select("tg_user_id").eq("tg_user_id", tgUserId).maybeSingle();
-  if (!data) await sb.from("users").insert({ tg_user_id: tgUserId });
+  const { data, error } = await sb.from("users").select("tg_user_id").eq("tg_user_id", tgUserId).maybeSingle();
+  if (error) throw error;
+  if (!data) {
+    const { error: insErr } = await sb.from("users").insert({ tg_user_id: tgUserId });
+    if (insErr) throw insErr;
+  }
 }
 
 async function getUser(tgUserId) {
@@ -62,7 +81,10 @@ async function getUser(tgUserId) {
 }
 
 async function setUser(tgUserId, patch) {
-  const { error } = await sb.from("users").update({ ...patch, updated_at: new Date().toISOString() }).eq("tg_user_id", tgUserId);
+  const { error } = await sb
+    .from("users")
+    .update({ ...patch, updated_at: new Date().toISOString() })
+    .eq("tg_user_id", tgUserId);
   if (error) throw error;
 }
 
@@ -81,9 +103,22 @@ async function getLocation(code) {
   return data;
 }
 
+function userFriendlyError(e) {
+  const msg = String(e?.message || e || "");
+  if (msg.includes("PGRST205") && msg.includes("locations")) {
+    return "⚠️ Lokatsiya bazasi hali yuklanmagan (locations).\nHozircha 📍 lokatsiyangizni yuboring.";
+  }
+  if (msg.includes("PGRST205") && msg.includes("users")) {
+    return "⚠️ Baza sozlanmagan (users jadvali yo‘q). Admin Supabase SQL’ni run qilishi kerak.";
+  }
+  if (msg.includes("Telegram") && msg.includes("Unauthorized")) {
+    return "⚠️ Bot token xato yoki env yo‘q. Vercel Environment Variables tekshiring.";
+  }
+  return "⚠️ Texnik xatolik. Iltimos keyinroq urinib ko‘ring.";
+}
+
 /**
- * Mini app initData validation (HMAC-SHA256) — Telegram talabi.
- * Telegram mini apps initData ni serverda validate qilish shart. :contentReference[oaicite:2]{index=2}
+ * Telegram Mini App initData validate (HMAC SHA256)
  */
 function validateInitData(initData) {
   const params = new URLSearchParams(initData);
@@ -110,40 +145,10 @@ function parseMiniappUser(initData) {
   return { tg_user_id: user.id };
 }
 
-function chunk(arr, size) {
-  const out = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out;
-}
-
-function locKeyboard(items, prefix, page, pageSize) {
-  const pages = chunk(items, pageSize);
-  const p = Math.max(0, Math.min(page, pages.length - 1));
-  const rows = (pages[p] || []).map(x => [{ text: x.name_uz, callback_data: `${prefix}:${x.code}:0` }]);
-
-  const nav = [];
-  if (p > 0) nav.push({ text: "⬅️", callback_data: `${prefix}:__PAGE__:${p - 1}` });
-  if (p < pages.length - 1) nav.push({ text: "➡️", callback_data: `${prefix}:__PAGE__:${p + 1}` });
-  if (nav.length) rows.push(nav);
-
-  return ik(rows);
-}
-
-function prefsKeyboard(u) {
-  const rows = [
-    [{ text: `🕌 Namoz: ${u.notify_prayers ? "ON" : "OFF"}`, callback_data: "pref:notify_prayers" }],
-    [{ text: `🌙 Ramazon: ${u.notify_ramadan ? "ON" : "OFF"}`, callback_data: "pref:notify_ramadan" }],
-    [{ text: `☀️ Har kuni ertalab: ${u.notify_daily_morning ? "ON" : "OFF"}`, callback_data: "pref:notify_daily_morning" }],
-    [{ text: `🌆 Har kuni kechqurun: ${u.notify_daily_evening ? "ON" : "OFF"}`, callback_data: "pref:notify_daily_evening" }],
-    [{ text: "📲 Mini App", web_app: { url: `${mustEnv("MINIAPP_URL")}` } }]
-  ];
-  return { reply_markup: { inline_keyboard: rows } };
-}
-
 async function isRamadanToday() {
-  const today = new Date(); // TZ=Asia/Tashkent bo'lsa to'g'ri
-  const d = today.toISOString().slice(0, 10);
-  const { data, error } = await sb.from("ramadan_periods")
+  const d = new Date().toISOString().slice(0, 10);
+  const { data, error } = await sb
+    .from("ramadan_periods")
     .select("*")
     .lte("starts_on", d)
     .gte("ends_on", d)
@@ -153,11 +158,12 @@ async function isRamadanToday() {
 }
 
 module.exports = {
-  sb, tg, ik, t,
-  BOT_TOKEN, TG_WEBHOOK_SECRET,
+  sb, tg, ik,
+  BOT_TOKEN, TG_WEBHOOK_SECRET, MINIAPP_URL,
   upsertUser, getUser, setUser,
   getChildren, getLocation,
-  parseMiniappUser,
   locKeyboard, prefsKeyboard,
+  userFriendlyError,
+  parseMiniappUser,
   isRamadanToday
 };

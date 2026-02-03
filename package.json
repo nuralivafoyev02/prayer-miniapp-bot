@@ -1,10 +1,8 @@
 {
-  "name": "prayer-ramadan-bot",
+  "name": "prayer-miniapp-bot",
   "private": true,
   "version": "1.0.0",
-  "engines": {
-    "node": "24.x"
-  },
+  "engines": { "node": "24.x" },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
     "adhan": "^4.4.3"

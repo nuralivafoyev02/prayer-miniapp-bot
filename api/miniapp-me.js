@@ -1,11 +1,16 @@
 const adhan = require("adhan");
-const { sb, parseMiniappUser } = require("../utils");
+const { sb, parseMiniappUser, isRamadanToday } = require("../utils");
+
+function hhmm(d) {
+  return new Date(d).toTimeString().slice(0, 5);
+}
 
 function prayerTimes(lat, lng, date) {
   const coords = new adhan.Coordinates(lat, lng);
   const params = adhan.CalculationMethod.MuslimWorldLeague();
   params.madhab = adhan.Madhab.Shafi;
   const pt = new adhan.PrayerTimes(coords, date, params);
+
   return {
     Bomdod: hhmm(pt.fajr),
     Peshin: hhmm(pt.dhuhr),
@@ -14,7 +19,6 @@ function prayerTimes(lat, lng, date) {
     Xufton: hhmm(pt.isha)
   };
 }
-function hhmm(d) { return new Date(d).toTimeString().slice(0, 5); }
 
 module.exports = async (req, res) => {
   try {
@@ -26,16 +30,19 @@ module.exports = async (req, res) => {
 
     const { data: u, error } = await sb.from("users").select("*").eq("tg_user_id", tg_user_id).maybeSingle();
     if (error) throw error;
-    if (!u?.lat || !u?.lng) return res.status(200).json({ ok: true, needsSetup: true });
+
+    if (!u?.lat || !u?.lng) {
+      return res.status(200).json({ ok: true, needsSetup: true });
+    }
 
     const today = new Date();
-    const tomorrow = new Date(today.getTime() + 24 * 3600 * 1000);
+    const tomorrow = new Date(today.getTime() + 86400000);
 
-    const { data: loc } = await sb.from("locations").select("*").eq("code", u.location_code).maybeSingle();
+    const ramadan = await isRamadanToday();
 
-    res.status(200).json({
+    return res.status(200).json({
       ok: true,
-      locationName: loc?.name_uz || "—",
+      ramadan,
       today: prayerTimes(u.lat, u.lng, today),
       tomorrow: prayerTimes(u.lat, u.lng, tomorrow),
       prefs: {
@@ -47,6 +54,6 @@ module.exports = async (req, res) => {
     });
   } catch (e) {
     console.error(e);
-    res.status(401).send("Unauthorized");
+    return res.status(401).send("Unauthorized");
   }
 };

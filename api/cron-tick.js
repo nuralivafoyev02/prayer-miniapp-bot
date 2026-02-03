@@ -17,10 +17,10 @@ module.exports = async (req, res) => {
       }
     }
 
-    res.status(200).send("ok");
+    return res.status(200).send("ok");
   } catch (e) {
     console.error(e);
-    res.status(500).send("error");
+    return res.status(500).send("error");
   }
 };
 
@@ -28,15 +28,5 @@ function render(kind, p) {
   if (kind.startsWith("prayer_")) return `🕌 ${p.name} vaqti kirdi`;
   if (kind === "suhoor") return `⏳ Og'iz yopish vaqti: ${p.time}`;
   if (kind === "iftar") return `🌙 Og'iz ochish vaqti: ${p.time}\n\n🤲 ${p.dua}`;
-  if (kind === "daily_morning") {
-    return `☀️ Bugungi namoz vaqtlari:\n${lines(p.today)}` + (p.ramadan ? `\n\n🌙 Ramazon eslatmalari yoqilgan` : "");
-  }
-  if (kind === "daily_evening") {
-    return `🌆 Ertangi namoz vaqtlari:\n${lines(p.tomorrow)}` + (p.ramadan ? `\n\n🌙 Ramazon eslatmalari yoqilgan` : "");
-  }
   return "Eslatma";
-}
-
-function lines(obj) {
-  return Object.entries(obj).map(([k, v]) => `• ${k}: ${v}`).join("\n");
 }

@@ -22,9 +22,9 @@ module.exports = async (req, res) => {
     const { error } = await sb.from("users").update(patch).eq("tg_user_id", tg_user_id);
     if (error) throw error;
 
-    res.status(200).json({ ok: true });
+    return res.status(200).json({ ok: true });
   } catch (e) {
     console.error(e);
-    res.status(401).send("Unauthorized");
+    return res.status(401).send("Unauthorized");
   }
 };
