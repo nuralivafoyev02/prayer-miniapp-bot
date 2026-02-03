@@ -3,7 +3,7 @@
   "crons": [
     { "path": "/api/cron-daily", "schedule": "5 19 * * *" }
   ],
-  "rewrites": [
-    { "source": "/", "destination": "/miniapp/" }
+  "redirects": [
+    { "source": "/", "destination": "/miniapp/", "permanent": false }
   ]
 }
