@@ -50,14 +50,14 @@ module.exports = async (req, res) => {
       if (u.notify_daily_morning) {
         await tg("sendMessage", {
           chat_id: u.tg_user_id,
-          text: `☀️ Bugungi namoz vaqtlari:\n${lines(mapTimes(t1))}${ramadan && u.notify_ramadan ? "\n\n🌙 Ramazon eslatmalari ON" : ""}`
+          text: `☀️ Bugungi namoz vaqtlari:\n${lines(mapTimes(t1, tz))}${ramadan && u.notify_ramadan ? "\n\n🌙 Ramazon eslatmalari ON" : ""}`
         }).catch(() => {});
       }
 
       if (u.notify_daily_evening) {
         await tg("sendMessage", {
           chat_id: u.tg_user_id,
-          text: `🌆 Ertangi namoz vaqtlari:\n${lines(mapTimes(t2))}${ramadan && u.notify_ramadan ? "\n\n🌙 Ramazon eslatmalari ON" : ""}`
+          text: `🌆 Ertangi namoz vaqtlari:\n${lines(mapTimes(t2, tz))}${ramadan && u.notify_ramadan ? "\n\n🌙 Ramazon eslatmalari ON" : ""}`
         }).catch(() => {});
       }
 
